@@ -1,0 +1,13 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { fileURLToPath } from 'node:url'; import { dirname, resolve } from 'node:path';
+const __dirname=dirname(fileURLToPath(import.meta.url));
+const transport=new StdioClientTransport({command:'node',args:[resolve(__dirname,'server.js')]});
+const client=new Client({name:'hexbg',version:'0.0.1'},{capabilities:{}});
+await client.connect(transport);
+const call=async(n,a={})=>{const r=await client.callTool({name:n,arguments:a});const t=r.content.find(c=>c.type==='text');let o={};try{o=JSON.parse(t.text)}catch{}if(r.isError)console.log('ERR',t.text);return o;};
+await call('prism_new_document',{width:200,height:90,background:'#0f1330'});
+await call('prism_add_text',{text:'AURORA',x:20,y:24,size:36,color:'#ffffff',bold:true});
+await call('prism_export_png',{path:resolve(__dirname,'hexbg-out.png')});
+console.log('exported hexbg-out.png with #0f1330 background');
+await client.close();process.exit(0);

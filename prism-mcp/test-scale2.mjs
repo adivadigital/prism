@@ -1,0 +1,16 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { fileURLToPath } from 'node:url'; import { dirname, resolve } from 'node:path';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const transport = new StdioClientTransport({ command:'node', args:[resolve(__dirname,'server.js')] });
+const client = new Client({ name:'scale2', version:'0.0.1' }, { capabilities:{} });
+await client.connect(transport);
+const call=async(n,a={})=>{const r=await client.callTool({name:n,arguments:a});const t=r.content.find(c=>c.type==='text');let o={};try{o=JSON.parse(t.text)}catch{}if(r.isError)console.log('ERR',n,t.text);return o;};
+const add=async(t,a)=>(await call(t,a)).id;
+await call('prism_new_document',{width:200,height:90,background:'transparent'});
+await add('prism_add_rectangle',{x:0,y:0,w:200,h:90,fill:'#1b2450',radius:14,name:'BG'});
+await add('prism_add_text',{text:'AURORA',x:22,y:26,size:36,color:'#ffffff',bold:true,name:'W'});
+await call('prism_export_png',{ path:resolve(__dirname,'scale2-1x.png'), scale:1 });
+await call('prism_export_png',{ path:resolve(__dirname,'scale2-3x.png'), scale:3 });
+console.log('done');
+await client.close(); process.exit(0);

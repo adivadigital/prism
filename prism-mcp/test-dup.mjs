@@ -1,0 +1,15 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { fileURLToPath } from 'node:url'; import { dirname, resolve } from 'node:path';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const transport = new StdioClientTransport({ command:'node', args:[resolve(__dirname,'server.js')] });
+const client = new Client({ name:'dup-test', version:'0.0.1' }, { capabilities:{} });
+await client.connect(transport);
+const call=async(n,a={})=>{const r=await client.callTool({name:n,arguments:a});const t=r.content.find(c=>c.type==='text');let o={};try{o=JSON.parse(t.text)}catch{}if(r.isError)console.log('ERR',n,t.text);return o;};
+console.log('has prism_duplicate_layer:', (await client.listTools()).tools.some(t=>t.name==='prism_duplicate_layer'));
+await call('prism_new_document',{width:300,height:200,background:'white'});
+const r=await call('prism_add_rectangle',{x:20,y:20,w:100,h:80,fill:'#2d7ff9',name:'Card'});
+const d=await call('prism_duplicate_layer',{id:r.id});
+console.log('dup id:', d.id, '| name:', d.name);
+console.log('stack:', (await call('prism_info')).layers.map(l=>l.name).join(' | '));
+await client.close(); process.exit(0);
