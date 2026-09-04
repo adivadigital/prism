@@ -82,6 +82,7 @@ const TOOLS = [
   { name: 'prism_redo', description: 'Redo.', inputSchema: { type: 'object', properties: {} } },
   { name: 'prism_render', description: 'Return the current composited canvas as a PNG image (so you can see the current state).', inputSchema: { type: 'object', properties: {} } },
   { name: 'prism_export_png', description: 'Export the document as a PNG. If path is given, saves to disk; always returns a preview image. scale (default 1) renders at a hi-DPI multiplier — 2 for @2x, 3 for @3x — vector shapes and text re-render crisp at the higher resolution (not a blurry upscale).', inputSchema: { type: 'object', properties: { path: str(), scale: num(1) } } },
+  { name: 'prism_export', description: 'Save the document to a file, choosing the format from the path extension: .psd (real layered Photoshop file — each layer preserved with its blend mode, opacity, visibility and effects baked in, plus an exact flattened composite), .pdf (single page, artwork embedded), .png (lossless, transparency), .jpg/.jpeg (flattened on white), or .webp. scale (png only, default 1) renders @2x/@3x with crisp vectors; quality (jpg/webp, 0-1, default 0.92). Returns the saved path.', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Absolute or relative output path; the extension picks the format (.psd/.pdf/.png/.jpg/.jpeg/.webp).' }, scale: num(1), quality: num(0.92) }, required: ['path'] } },
 
   // --- Smart objects (non-destructive) ---
   { name: 'prism_to_smart_object', description: 'Convert a layer (by id, else active) into a Smart Object so filters/adjustments applied to it stay re-editable and non-destructive.', inputSchema: { type: 'object', properties: { id: str() } } },
@@ -161,6 +162,20 @@ async function dispatch(name, a = {}) {
       let saved = null;
       if (a.path) { await writeFile(resolve(a.path), Buffer.from(b64, 'base64')); saved = resolve(a.path); }
       return withImage(saved ? { saved } : { saved: null, note: 'no path given; preview only' }, b64);
+    }
+    case 'prism_export': {
+      const p = resolve(a.path);
+      const ext = (a.path.match(/\.([a-z0-9]+)$/i) || [,''])[1].toLowerCase();
+      let b64, preview = null;
+      if (ext === 'psd') { b64 = await api('exportPSD'); }
+      else if (ext === 'pdf') { b64 = await api('exportPDF'); }
+      else if (ext === 'jpg' || ext === 'jpeg') { b64 = (await api('exportJPEG', [a.quality])).split(',')[1]; preview = b64; }
+      else if (ext === 'webp') { b64 = (await api('exportWebP', [a.quality])).split(',')[1]; }
+      else if (ext === 'png' || ext === '') { b64 = (await api('exportPNG', [a.scale])).split(',')[1]; preview = b64; }
+      else throw new Error('Unsupported extension .' + ext + ' — use .psd, .pdf, .png, .jpg, .jpeg or .webp');
+      await writeFile(p, Buffer.from(b64, 'base64'));
+      const info = { saved: p, format: ext || 'png', bytes: Buffer.from(b64, 'base64').length };
+      return preview ? withImage(info, preview) : text(info);
     }
     // Smart objects
     case 'prism_to_smart_object': return text(await api('toSmartObject', [a.id]));
