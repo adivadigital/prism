@@ -4113,6 +4113,40 @@ function exportAs(type){
   ctx.drawImage(view,0,0);
   c.toBlob(blob=>{ const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=(State.fileName.replace(/\.[^.]+$/,'')||'prism')+'.'+type; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000); }, mime, q);
 }
+//==================== SAVE FOR WEB (format + quality + resize, live preview & file size) ====================
+function fmtBytes(n){ return n<1024?n+' B' : n<1048576?(n/1024).toFixed(1)+' KB' : (n/1048576).toFixed(2)+' MB'; }
+function sfwRenderCanvas(fmt,w,h){ const W=State.width,H=State.height; const c=document.createElement('canvas'); c.width=Math.max(1,Math.round(w)); c.height=Math.max(1,Math.round(h)); const ctx=c.getContext('2d'); ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality='high'; if(fmt==='jpg'){ ctx.fillStyle='#fff'; ctx.fillRect(0,0,c.width,c.height); } ctx.drawImage(view,0,0,W,H,0,0,c.width,c.height); return c; }
+function saveForWebDialog(){
+  composite(); const W=State.width,H=State.height; const st={format:'jpg', quality:80, w:W, h:H, link:true};
+  const mimeOf=f=>f==='png'?'image/png':f==='webp'?'image/webp':'image/jpeg';
+  showDialog(`<h3>Save for Web</h3><div class="dbody" style="min-width:440px;display:flex;gap:16px">
+    <div style="flex:1">
+      <div class="row"><label>Format</label><select id="sfwFmt"><option value="jpg">JPEG</option><option value="png">PNG-24</option><option value="webp">WebP</option></select></div>
+      <div class="row" id="sfwQRow">${sliderRow('Quality','sfwQ',1,100,80)}</div>
+      <div class="row"><label>Width</label><input id="sfwW" type="number" value="${W}" style="width:80px"> px</div>
+      <div class="row"><label>Height</label><input id="sfwH" type="number" value="${H}" style="width:80px"> px</div>
+      <div class="row"><label>Scale</label><span style="display:flex;gap:6px">${[25,50,100].map(p=>`<button class="sfwScale" data-p="${p}">${p}%</button>`).join('')}<label style="min-width:auto;margin-left:8px"><input type="checkbox" id="sfwLink" checked> Lock aspect</label></span></div>
+    </div>
+    <div style="width:210px;text-align:center">
+      <div style="background:conic-gradient(#0000 0 25%,#8883 0 50%,#0000 0 75%,#8883 0) 0 0/16px 16px, #222;border:1px solid var(--line);border-radius:6px;height:180px;display:flex;align-items:center;justify-content:center;overflow:hidden"><img id="sfwPrev" style="max-width:100%;max-height:100%;display:block"></div>
+      <div id="sfwSize" style="margin-top:8px;font-size:12px;color:var(--text-dim)">…</div>
+    </div>
+  </div>`, ()=>{ const c=sfwRenderCanvas(st.format,st.w,st.h); c.toBlob(b=>{ const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=(State.fileName.replace(/\.[^.]+$/,'')||'prism')+'-web.'+st.format; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000); }, mimeOf(st.format), st.format==='png'?undefined:st.quality/100); toast('Exported for web'); }, 'Export');
+  let t=null;
+  const update=()=>{ clearTimeout(t); t=setTimeout(()=>{ const c=sfwRenderCanvas(st.format,st.w,st.h); c.toBlob(b=>{ if(!b)return; const url=URL.createObjectURL(b); const img=$('#sfwPrev'); if(img){ if(img._u)URL.revokeObjectURL(img._u); img._u=url; img.src=url; } const se=$('#sfwSize'); if(se) se.textContent=`${st.format.toUpperCase()} · ${fmtBytes(b.size)} · ${Math.round(st.w)}×${Math.round(st.h)}`; }, mimeOf(st.format), st.format==='png'?undefined:st.quality/100); }, 120); };
+  setTimeout(()=>{
+    const qRow=$('#sfwQRow'); const setQVis=()=>{ qRow.style.display = st.format==='png'?'none':''; };
+    $('#sfwFmt').onchange=e=>{ st.format=e.target.value; setQVis(); update(); };
+    $('#sfwQ').oninput=e=>{ st.quality=+e.target.value; $('#sfwQV').textContent=e.target.value; update(); };
+    const setW=v=>{ st.w=Math.max(1,Math.round(v)); if(st.link)st.h=Math.max(1,Math.round(st.w*H/W)); $('#sfwW').value=st.w; $('#sfwH').value=st.h; };
+    const setH=v=>{ st.h=Math.max(1,Math.round(v)); if(st.link)st.w=Math.max(1,Math.round(st.h*W/H)); $('#sfwW').value=st.w; $('#sfwH').value=st.h; };
+    $('#sfwW').oninput=e=>{ setW(+e.target.value); update(); };
+    $('#sfwH').oninput=e=>{ setH(+e.target.value); update(); };
+    $('#sfwLink').onchange=e=>{ st.link=e.target.checked; };
+    document.querySelectorAll('.sfwScale').forEach(b=>b.onclick=()=>{ const p=+b.dataset.p/100; st.w=Math.round(W*p); st.h=Math.round(H*p); $('#sfwW').value=st.w; $('#sfwH').value=st.h; update(); });
+    setQVis(); update();
+  },10);
+}
 //---- Native project save/load ----
 function serializeProject(){
   return { prism:1, width:State.width, height:State.height, activeId:State.activeId, fileName:State.fileName, guides:State.guides||[],
@@ -4163,6 +4197,7 @@ const MENUS={
     {sep:1},
     {label:'Save Project (.prism)',kbd:'⌘S',fn:saveProject},
     {sub:'Export'},
+    {label:'Save for Web…',kbd:'⌥⇧⌘S',fn:()=>saveForWebDialog()},
     {label:'Export as PNG',kbd:'⇧⌘S',fn:()=>exportAs('png')},
     {label:'Export as JPG',fn:()=>exportAs('jpg')},
     {label:'Export as WebP',fn:()=>exportAs('webp')},
@@ -4512,7 +4547,7 @@ window.addEventListener('keydown',e=>{
     if(k==='n'&&!e.shiftKey){e.preventDefault();newDialog();return;}
     if(k==='n'&&e.shiftKey){e.preventDefault();addLayer(newLayer('Layer '+State.layers.length));pushHistory('New Layer');return;}
     if(k==='o'){e.preventDefault();openFilePicker();return;}
-    if(k==='s'){e.preventDefault(); if(e.shiftKey)exportAs('png'); else if(State.soEdit)updateSmartFromEdit(); else saveProject(); return;}
+    if(k==='s'){e.preventDefault(); if(e.shiftKey&&e.altKey)saveForWebDialog(); else if(e.shiftKey)exportAs('png'); else if(State.soEdit)updateSmartFromEdit(); else saveProject(); return;}
     if(k==='a'){e.preventDefault();selectAll();pushHistory('Select All');return;}
     if(k==='d'){e.preventDefault();clearSelection();return;}
     if(k==='i'&&e.shiftKey){e.preventDefault();invertSelection();return;}
