@@ -1854,6 +1854,7 @@ function onPointerDown(e){
   if(tool==='pen'){ penDown(p, e); return; }
   if(tool==='pathedit'){ pathEditDown(p, e); return; }
   if(tool==='width'){ widthDown(p, e); return; }
+  if(tool==='crop' && straightenMode){ pointer.straightening=true; return; }
 
   // Move: snapshot every selected, movable layer at drag-start (pristine pixels/geometry) so the
   // whole set moves together by the total delta — no cumulative resampling loss, off-canvas pixels
@@ -1916,7 +1917,7 @@ function onPointerMove(e){
 
   if(tool==='marquee'){ drawMarqueePreview(pointer.ix,pointer.iy,p.x,p.y,'rect'); return; }
   if(tool==='ellipse-marquee'){ drawMarqueePreview(pointer.ix,pointer.iy,p.x,p.y,'ellipse'); return; }
-  if(tool==='crop'){ const e=cropEnd(pointer.ix,pointer.iy,p.x,p.y); drawCropPreview(pointer.ix,pointer.iy,e.x1,e.y1); return; }
+  if(tool==='crop'){ if(pointer.straightening){ drawStraightenLine(pointer.ix,pointer.iy,p.x,p.y); return; } const e=cropEnd(pointer.ix,pointer.iy,p.x,p.y); drawCropPreview(pointer.ix,pointer.iy,e.x1,e.y1); return; }
   if(tool.startsWith('shape')){ drawShapePreview(pointer.ix,pointer.iy,p.x,p.y); return; }
   if(tool==='gradient'){ drawGradientPreview(pointer.ix,pointer.iy,p.x,p.y); return; }
   if(tool==='lasso'){ pointer.polyPoints.push({x:p.x,y:p.y}); drawLassoPreview(pointer.polyPoints); return; }
@@ -1947,7 +1948,7 @@ function onPointerUp(e){
   if(tool==='marquee'){ setRectSelection(pointer.ix,pointer.iy,p.x,p.y,'rect'); pushHistory('Marquee'); }
   else if(tool==='ellipse-marquee'){ setRectSelection(pointer.ix,pointer.iy,p.x,p.y,'ellipse'); pushHistory('Ellipse Marquee'); }
   else if(tool==='lasso'){ if(pointer.polyPoints&&pointer.polyPoints.length>2){ setPolygonSelection(pointer.polyPoints); pushHistory('Lasso'); } pointer.polyPoints=null; }
-  else if(tool==='crop'){ const e=cropEnd(pointer.ix,pointer.iy,p.x,p.y); doCrop(pointer.ix,pointer.iy,e.x1,e.y1); }
+  else if(tool==='crop'){ if(pointer.straightening){ pointer.straightening=false; straightenMode=false; renderOptionsBar(); const dx=p.x-pointer.ix, dy=p.y-pointer.iy; if(Math.hypot(dx,dy)>6){ let ang=Math.atan2(dy,dx)*180/Math.PI; ang=((ang%90)+135)%90-45; straighten(ang); } else ov(); } else { const e=cropEnd(pointer.ix,pointer.iy,p.x,p.y); doCrop(pointer.ix,pointer.iy,e.x1,e.y1); } }
   else if(tool.startsWith('shape')){ commitShape(pointer.ix,pointer.iy,p.x,p.y); }
   else if(tool==='gradient'){ drawGradient(pointer.ix,pointer.iy,p.x,p.y); pushHistory('Gradient'); }
   else if(tool==='brush'||tool==='eraser'){ if(pointer.stroke) endBrushStroke(); pushHistory(tool==='eraser'?'Eraser':'Brush'); }
@@ -2425,14 +2426,41 @@ function openShapeDialog(l){
     if($('#shR')) $('#shR').oninput=()=>{$('#shRV').textContent=$('#shR').value; apply();};
   },10);
 }
-function doCrop(x0,y0,x1,y1){
+function doCrop(x0,y0,x1,y1,label){
   const x=clamp(Math.round(Math.min(x0,x1)),0,State.width), y=clamp(Math.round(Math.min(y0,y1)),0,State.height);
   const w=Math.round(Math.abs(x1-x0)), h=Math.round(Math.abs(y1-y0)); if(w<2||h<2){ov();return;}
   for(const l of State.layers){ const tmp=makeLayerCanvas(); const t=tmp.getContext('2d'); t.drawImage(l.canvas,-x,-y); l.canvas.width=w;l.canvas.height=h; l.ctx.drawImage(tmp,0,0,w,h,0,0,w,h);
     if(l.mask){ const mt=makeLayerCanvas(); mt.getContext('2d').drawImage(l.mask,-x,-y); l.mask.width=w;l.mask.height=h; l.maskCtx.drawImage(mt,0,0,w,h,0,0,w,h); l._maskAlpha=null;l._maskDirty=true; }
     if(l.smart&&l.smartSource){ const st=makeLayerCanvas(); st.getContext('2d').drawImage(l.smartSource,-x,-y); l.smartSource.width=w;l.smartSource.height=h; l.smartSource.getContext('2d').drawImage(st,0,0,w,h,0,0,w,h); } }
-  State.width=w;State.height=h; resizeCanvases(); for(const l of State.layers)if(l.smart&&l.smartSource){ if(l.soContent)resnapSmartContent(l); renderSmartFilters(l); } State.selection=null; renderLayerList(); composite(); fitToScreen(); pushHistory('Crop');
+  State.width=w;State.height=h; resizeCanvases(); for(const l of State.layers)if(l.smart&&l.smartSource){ if(l.soContent)resnapSmartContent(l); renderSmartFilters(l); } State.selection=null; renderLayerList(); composite(); fitToScreen(); pushHistory(label||'Crop');
 }
+// Largest axis-aligned rectangle that fits inside a w×h rectangle rotated by |angle| (rad).
+function largestRotatedRect(w,h,angle){ if(w<=0||h<=0)return{w:0,h:0}; const s=Math.abs(Math.sin(angle)), c=Math.abs(Math.cos(angle));
+  const wLong=w>=h, long=wLong?w:h, short=wLong?h:w;
+  if(short<=2*s*c*long || Math.abs(s-c)<1e-10){ const x=0.5*short, a=(s*c<=1e-10)?1:s, b=(s*c<=1e-10)?1:c; return wLong?{w:x/a,h:x/b}:{w:x/b,h:x/a}; }
+  const cos2=c*c-s*s; return {w:(w*c-h*s)/cos2, h:(h*c-w*s)/cos2}; }
+let straightenMode=false;
+// Rotate the whole document by -angleDeg (to level a tilted reference), then auto-crop the empty corners.
+function straighten(angleDeg){ if(!angleDeg||Math.abs(angleDeg)<0.01){ ov(); return; }
+  const rad=-angleDeg*Math.PI/180, W=State.width,H=State.height, cx=W/2, cy=H/2;
+  const rotInto=(canvas,ctx)=>{ const tmp=makeLayerCanvas(); tmp.getContext('2d').drawImage(canvas,0,0); ctx.clearRect(0,0,W,H); ctx.save(); ctx.translate(cx,cy); ctx.rotate(rad); ctx.drawImage(tmp,-cx,-cy); ctx.restore(); };
+  for(const l of State.layers){ rotInto(l.canvas,l.ctx);
+    if(l.mask){ rotInto(l.mask,l.maskCtx); l._maskAlpha=null; l._maskDirty=true; }
+    if(l.smart&&l.smartSource){ rotInto(l.smartSource, l.smartSource.getContext('2d')); } }
+  const cos=Math.cos(rad), sin=Math.sin(rad);
+  for(const l of State.layers){
+    if(l.smart&&l.smartSource){ if(l.soContent)resnapSmartContent(l); renderSmartFilters(l); }
+    else if(isPath(l)){ mapPathPoints(l.shape,(x,y)=>{ const dx=x-cx,dy=y-cy; return {x:cx+dx*cos-dy*sin,y:cy+dx*sin+dy*cos}; }); renderShapeLayer(l); }
+    else if(l.type==='shape'&&l.shape){ const dx=l.shape.cx-cx,dy=l.shape.cy-cy; l.shape.cx=cx+dx*cos-dy*sin; l.shape.cy=cy+dx*sin+dy*cos; l.shape.angle=(l.shape.angle||0)+rad; renderShapeLayer(l); }
+    else if(l.type==='text'&&l.text){ l.type='pixel'; l.text=null; }
+    fxInvalidate(l);
+  }
+  const r=largestRotatedRect(W,H,rad); const cw=Math.min(W,Math.floor(r.w)), ch=Math.min(H,Math.floor(r.h));
+  const x=Math.round((W-cw)/2), y=Math.round((H-ch)/2); State.selection=null;
+  if(cw>2&&ch>2) doCrop(x,y,x+cw,y+ch,'Straighten'); else { composite(); pushHistory('Straighten'); }
+  toast('Straightened '+(-angleDeg).toFixed(1)+'°');
+}
+function drawStraightenLine(x0,y0,x1,y1){ const c=ov(); const z=State.zoom||1; c.strokeStyle='#2d7ff9'; c.lineWidth=1.5/z; c.setLineDash([5/z,4/z]); c.beginPath(); c.moveTo(x0,y0); c.lineTo(x1,y1); c.stroke(); c.setLineDash([]); const ang=Math.atan2(y1-y0,x1-x0)*180/Math.PI; const dev=((ang%90)+135)%90-45; c.fillStyle='#2d7ff9'; c.font=`${11/z}px system-ui`; c.fillText(dev.toFixed(1)+'°', x1+6/z, y1); }
 
 //---- Editable text layers ----
 const TEXT_FONTS=['Arial','Helvetica','Georgia','Times New Roman','Courier New','Verdana','Impact','Trebuchet MS','Comic Sans MS','Palatino'];
@@ -2869,7 +2897,7 @@ function renderOptionsBar(){
   if(State.tool==='text'){ html+=`<label>Font <select id="oFont"><option>Arial</option><option>Georgia</option><option>Impact</option><option>Courier New</option></select></label><label>Size <input type="number" id="oFontSize" value="${Opt.fontSize}"></label>`; }
   if(State.tool==='crop'){ const R=[['0','Free'],['-1','Original'],['1','1:1'],['0.8','4:5'],['1.25','5:4'],['1.5','3:2'],['0.6667','2:3'],['1.7778','16:9'],['0.5625','9:16']];
     const cur=String(Opt.cropAspect); const opts=R.map(([v,n])=>`<option value="${v}" ${cur===v||(cur==='0.6667'&&v==='0.6667')?'selected':''}>${n}</option>`).join('');
-    html+=`<label>Ratio <select id="oCropR">${opts}</select></label><span style="color:var(--text-dim)">drag to crop · rule-of-thirds guide</span>`; }
+    html+=`<label>Ratio <select id="oCropR">${opts}</select></label><button id="oStraighten"${straightenMode?' class="active"':''}>Straighten</button><span style="color:var(--text-dim)">${straightenMode?'drag a line along something that should be level':'drag to crop · rule-of-thirds guide'}</span>`; }
   if(State.tool==='zoom'){ html+=`<button id="zoomFit">Fit Screen</button><button id="zoom100">100%</button>`; }
   bar.innerHTML=html;
   const bind=(id,vid,key,fn)=>{ const el=$('#'+id); if(!el)return; el.oninput=()=>{ Opt[key]=+el.value; if(vid)$('#'+vid).textContent=el.value; if(fn)fn(); }; };
@@ -2880,6 +2908,7 @@ function renderOptionsBar(){
   if($('#oGradSwatch')){ paintGradientSwatch($('#oGradSwatch'), curGradient().stops); $('#oGradSwatch').onclick=()=>openGradientEditor(()=>renderOptionsBar()); }
   if($('#oGradEdit'))$('#oGradEdit').onclick=()=>openGradientEditor(()=>renderOptionsBar());
   if($('#oCropR'))$('#oCropR').onchange=e=>{ Opt.cropAspect=parseFloat(e.target.value); };
+  if($('#oStraighten'))$('#oStraighten').onclick=()=>{ straightenMode=!straightenMode; renderOptionsBar(); if(straightenMode)toast('Drag a line along something that should be level'); };
   if($('#oFont'))$('#oFont').onchange=e=>Opt.fontFamily=e.target.value;
   if($('#oFontSize'))$('#oFontSize').oninput=e=>Opt.fontSize=+e.target.value;
   if($('#zoomFit'))$('#zoomFit').onclick=fitToScreen;
