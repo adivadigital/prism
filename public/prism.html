@@ -349,27 +349,41 @@ function docSprite(l){
   return l.canvas;
 }
 // Paint one drawable's own pixels into hctx (caller sets alpha/blend). Crisp for simple vectors.
+function paintLayerBaseHi(ctx, l){ // base pixels only (no vector mask), into ctx at hi-res
+  if(isSimpleVector(l)){ if(l.type==='shape') renderShapeLayer(l, ctx, RS); else renderTextLayer(l, ctx, RS); ctx.setTransform(1,0,0,1,0,0); }
+  else { ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality='high'; ctx.drawImage(docSprite(l), 0,0, State.width,State.height, 0,0, HW,HH); }
+}
 function paintPixelsHi(hctx, l){
   if(l.__group){ hctx.drawImage(l.hi,0,0); return; }
-  if(isSimpleVector(l)){
-    if(l.type==='shape') renderShapeLayer(l, hctx, RS); else renderTextLayer(l, hctx, RS);
-    hctx.setTransform(1,0,0,1,0,0);
-  } else {
-    hctx.imageSmoothingEnabled=true; hctx.imageSmoothingQuality='high';
-    hctx.drawImage(docSprite(l), 0,0, State.width,State.height, 0,0, HW,HH);
+  if(l.vectorMask){ // clip to the vector-mask path (filled crisp at the current render scale)
+    const t=getTmpHi(4), tc=t.getContext('2d'); tc.setTransform(1,0,0,1,0,0); tc.globalAlpha=1; tc.globalCompositeOperation='source-over'; tc.clearRect(0,0,HW,HH);
+    paintLayerBaseHi(tc, l);
+    const m=getTmpHi(5), mx=m.getContext('2d'); mx.setTransform(RS,0,0,RS,0,0); mx.globalAlpha=1; mx.globalCompositeOperation='source-over'; mx.clearRect(0,0,State.width,State.height);
+    const vm=l.vectorMask; if(vm.pts&&vm.pts.length>=2){ mx.beginPath(); tracePath(mx,vm.pts,vm.closed!==false); const cmp=vm.subs&&vm.subs.length; if(cmp)for(const sp of vm.subs)tracePath(mx,sp,true); mx.fillStyle='#fff'; mx.fill(cmp?'evenodd':'nonzero'); }
+    tc.setTransform(1,0,0,1,0,0); tc.globalCompositeOperation='destination-in'; tc.drawImage(m,0,0); tc.globalCompositeOperation='source-over';
+    hctx.setTransform(1,0,0,1,0,0); hctx.drawImage(t,0,0); return;
   }
+  paintLayerBaseHi(hctx, l);
 }
-// Draw a non-clipped drawable with its opacity+blend, isolating vectors through a temp when
-// opacity/blend would otherwise double-count on overlapping fill+stroke.
+// Blend If at hi-res: same as applyBlendIf but sized to the hi-res buffer, reading the hi-res backdrop.
+function applyBlendIfHi(sprite, l, hctx){ const bi=l.blendIf; const out=getTmpHi(6); const octx=out.getContext('2d');
+  octx.setTransform(1,0,0,1,0,0); octx.globalAlpha=1; octx.globalCompositeOperation='source-over'; octx.clearRect(0,0,HW,HH); octx.drawImage(sprite,0,0);
+  const sd=octx.getImageData(0,0,HW,HH), s=sd.data; const bd=hctx.getImageData(0,0,HW,HH).data;
+  const ch=bi.channel||'gray'; const lum=(d,i)=> ch==='red'?d[i] : ch==='green'?d[i+1] : ch==='blue'?d[i+2] : (d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114);
+  const dThis=bandIsDefault(bi.this), dUnder=bandIsDefault(bi.under);
+  for(let i=0;i<s.length;i+=4){ if(!s[i+3])continue; let m=1; if(!dThis) m*=blendIfRamp(lum(s,i),bi.this); if(!dUnder) m*=blendIfRamp(lum(bd,i),bi.under); if(m<1) s[i+3]=s[i+3]*m; }
+  octx.putImageData(sd,0,0); return out; }
+// Draw a drawable with its opacity + Fill + Blend If + blend mode; isolates through a temp when needed.
 function drawOneHi(hctx, d){
   const op=(d.opacity==null?100:d.opacity)/100, blend=d.blend||'source-over';
-  if(d.__group || !isSimpleVector(d) || (op>=1 && blend==='source-over')){
-    hctx.globalAlpha=op; hctx.globalCompositeOperation=blend; paintPixelsHi(hctx, d);
-    hctx.globalAlpha=1; hctx.globalCompositeOperation='source-over'; return;
-  }
+  if(d.__group){ hctx.globalAlpha=op; hctx.globalCompositeOperation=blend; hctx.drawImage(d.hi,0,0); hctx.globalAlpha=1; hctx.globalCompositeOperation='source-over'; return; }
+  const fill = hasStyles(d) ? 1 : ((d.fillOpacity==null?100:d.fillOpacity)/100);   // styled layers bake Fill into docSprite
+  const eff = op*fill; const needsBlendIf = isBlendIfActive(d.blendIf);
+  if(eff>=1 && blend==='source-over' && !needsBlendIf && !d.vectorMask){ paintPixelsHi(hctx, d); return; }  // crisp fast path
   const t=getTmpHi(3), tc=t.getContext('2d'); tc.setTransform(1,0,0,1,0,0); tc.globalAlpha=1; tc.globalCompositeOperation='source-over'; tc.clearRect(0,0,HW,HH);
-  paintPixelsHi(tc, d);
-  hctx.globalAlpha=op; hctx.globalCompositeOperation=blend; hctx.setTransform(1,0,0,1,0,0); hctx.drawImage(t,0,0);
+  paintPixelsHi(tc, d);                        // base (+ vector mask)
+  const spr = needsBlendIf ? applyBlendIfHi(t, d, hctx) : t;
+  hctx.setTransform(1,0,0,1,0,0); hctx.globalAlpha=eff; hctx.globalCompositeOperation=blend; hctx.drawImage(spr,0,0);
   hctx.globalAlpha=1; hctx.globalCompositeOperation='source-over';
 }
 // Composite a sibling list (groups already resolved to {__group,hi}) honoring clip runs.
@@ -573,6 +587,7 @@ function drawMaskedInto(ctx, l, alpha, blend){
   if(hasStyles(l)) sprite = fxCacheValid(l) ? l._fxCanvas : renderLayerStyled(l, maskedLayerCanvas(l,0));  // fill baked inside
   else if(l.mask) sprite = maskedLayerCanvas(l,0);
   else sprite = l.canvas;
+  if(l.vectorMask) sprite = applyVectorMask(sprite, l.vectorMask);
   if(isBlendIfActive(l.blendIf)) sprite = applyBlendIf(sprite, l, ctx);
   ctx.globalAlpha = hasStyles(l) ? alpha : alpha*fill;   // no styles → Fill just dims the pixels
   ctx.globalCompositeOperation=blend; ctx.drawImage(sprite,0,0);
@@ -2310,11 +2325,31 @@ function finishPen(){ if(!pen)return; const l=pen.layer; pen=null;
 function cancelPen(){ if(!pen)return; const l=pen.layer; pen=null; const i=State.layers.indexOf(l); if(i>=0){ State.layers.splice(i,1); State.activeId=(State.layers[Math.max(0,i-1)]||{}).id||null; } renderLayerList(); composite(); ov(); }
 // Direct Selection: drag anchors/handles of the active path
 function contoursOf(s){ return [s.pts, ...(s.subs||[])]; }
+//==================== VECTOR MASKS (clip a layer to an editable path) ====================
+// The path object Direct-Selection / Pen overlays edit: a path shape's own geometry, or a layer's vector mask.
+function editablePathOf(l){ if(isPath(l)) return l.shape; return (l && l.vectorMask) || null; }
+function vectorMaskCanvas(vm){ const W=State.width,H=State.height; const c=getTmp(7); const ctx=c.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over'; ctx.clearRect(0,0,W,H);
+  if(vm.pts && vm.pts.length>=2){ ctx.beginPath(); tracePath(ctx, vm.pts, vm.closed!==false); const compound=vm.subs&&vm.subs.length; if(compound) for(const sp of vm.subs) tracePath(ctx,sp,true); ctx.fillStyle='#fff'; ctx.fill(compound?'evenodd':'nonzero'); }
+  return c; }
+function applyVectorMask(sprite, vm){ const W=State.width,H=State.height; const out=getTmp(6); const octx=out.getContext('2d'); octx.setTransform(1,0,0,1,0,0); octx.globalAlpha=1; octx.globalCompositeOperation='source-over'; octx.clearRect(0,0,W,H); octx.drawImage(sprite,0,0); octx.globalCompositeOperation='destination-in'; octx.drawImage(vectorMaskCanvas(vm),0,0); octx.globalCompositeOperation='source-over'; return out; }
+function fullCanvasRectPath(){ const W=State.width,H=State.height, mk=(x,y)=>({x,y,hIn:null,hOut:null}); return {pts:[mk(0,0),mk(W,0),mk(W,H),mk(0,H)], closed:true}; }
+function addVectorMask(mode){ const l=activeLayer(); if(!l){toast('No layer');return;} if(l.type==='group'||l.type==='adjust'){toast('Vector masks apply to image/shape layers');return;}
+  l.vectorMask = mode==='hide' ? {pts:[],closed:true} : fullCanvasRectPath(); l._fxDirty=true; renderLayerList(); composite();
+  if(State.tool!=='pathedit'&&State.tool!=='pen') selectTool('pathedit'); drawPenOverlay();
+  pushHistory('Add Vector Mask'); toast('Vector mask added — edit its shape with Direct Selection (A) or the Pen (P)'); }
+function vectorMaskFromPath(){ const l=activeLayer(); if(!l){toast('No layer');return;} if(l.type==='group'||l.type==='adjust'){toast('Vector masks apply to image/shape layers');return;}
+  const pathLayer = State.layers.slice().reverse().find(x=>isPath(x)&&x!==l); if(!pathLayer){ toast('Draw a path with the Pen tool first, then try again'); return; }
+  const s=cloneShape(pathLayer.shape); l.vectorMask={pts:s.pts, closed:s.closed!==false, subs:s.subs||null};
+  const i=State.layers.indexOf(pathLayer); if(i>=0)State.layers.splice(i,1); if(State.activeId===pathLayer.id)State.activeId=l.id;
+  l._fxDirty=true; renderLayerList(); composite(); pushHistory('Vector Mask from Path'); toast('Vector mask created from path'); }
+function deleteVectorMask(){ const l=activeLayer(); if(!l||!l.vectorMask){toast('No vector mask');return;} l.vectorMask=null; l._fxDirty=true; renderLayerList(); composite(); ov(); drawSelectionOverlay(); pushHistory('Delete Vector Mask'); }
+function rerenderEditTarget(pe){ if(pe.isMask){ pe.layer._fxDirty=true; composite(); } else renderShapeLayer(pe.layer); }
 function pathEditDown(p, e){
-  let l = isPath(activeLayer()) ? activeLayer() : State.layers.slice().reverse().find(isPath);
-  if(!l){ toast('No path here — draw one with the Pen tool (P)'); pointer.down=false; return; }
-  setActiveLayer(l.id); const s=l.shape; const tol=8/(State.zoom||1); const cs=contoursOf(s);
-  pathEdit={layer:l, grab:null, moved:false};
+  let l = editablePathOf(activeLayer()) ? activeLayer() : State.layers.slice().reverse().find(x=>isPath(x)||x.vectorMask);
+  if(!l){ toast('No path here — draw one with the Pen tool (P), or add a vector mask'); pointer.down=false; return; }
+  setActiveLayer(l.id); const s=editablePathOf(l); if(!s){ pointer.down=false; return; } const isMask=!isPath(l);
+  const tol=8/(State.zoom||1); const cs=contoursOf(s);
+  pathEdit={layer:l, path:s, isMask, grab:null, moved:false};
   for(let ci=0; ci<cs.length && !pathEdit.grab; ci++){ const arr=cs[ci];
     for(let i=0;i<arr.length && !pathEdit.grab;i++){ const pt=arr[i];
       if(pt.hOut && Math.hypot(p.x-pt.hOut.x,p.y-pt.hOut.y)<tol) pathEdit.grab={ci, type:'hOut', i};
@@ -2322,18 +2357,18 @@ function pathEditDown(p, e){
   if(!pathEdit.grab){ for(let ci=0; ci<cs.length && !pathEdit.grab; ci++){ const arr=cs[ci];
     for(let i=0;i<arr.length && !pathEdit.grab;i++){ const pt=arr[i]; if(Math.hypot(p.x-pt.x,p.y-pt.y)<tol) pathEdit.grab={ci, type:'anchor', i}; } } }
   if(pathEdit.grab && pathEdit.grab.type==='anchor' && e.altKey && cs[pathEdit.grab.ci].length>2){ // Alt-click an anchor → delete it
-    cs[pathEdit.grab.ci].splice(pathEdit.grab.i,1); pathEdit.grab=null; renderShapeLayer(l); composite(); drawPenOverlay(); pushHistory('Delete Anchor'); pointer.down=false; return; }
+    cs[pathEdit.grab.ci].splice(pathEdit.grab.i,1); pathEdit.grab=null; rerenderEditTarget(pathEdit); drawPenOverlay(); pushHistory('Delete Anchor'); pointer.down=false; return; }
   drawPenOverlay();
 }
-function pathEditMove(p){ if(!pathEdit||!pathEdit.grab)return; const s=pathEdit.layer.shape, g=pathEdit.grab, pt=contoursOf(s)[g.ci][g.i]; pathEdit.moved=true;
+function pathEditMove(p){ if(!pathEdit||!pathEdit.grab)return; const s=pathEdit.path, g=pathEdit.grab, pt=contoursOf(s)[g.ci][g.i]; pathEdit.moved=true;
   if(g.type==='anchor'){ const dx=p.x-pt.x, dy=p.y-pt.y; pt.x=p.x; pt.y=p.y; if(pt.hIn){pt.hIn.x+=dx;pt.hIn.y+=dy;} if(pt.hOut){pt.hOut.x+=dx;pt.hOut.y+=dy;} }
   else { pt[g.type]={x:p.x,y:p.y}; const opp=g.type==='hOut'?'hIn':'hOut'; if(pt[opp]){ pt[opp]={x:2*pt.x-p.x, y:2*pt.y-p.y}; } } // symmetric smooth handles
-  renderShapeLayer(pathEdit.layer); composite(); drawPenOverlay();
+  rerenderEditTarget(pathEdit); drawPenOverlay();
 }
-function pathEditUp(){ if(!pathEdit)return; if(pathEdit.moved) pushHistory('Edit Path'); pathEdit.grab=null; }
+function pathEditUp(){ if(!pathEdit)return; if(pathEdit.moved) pushHistory(pathEdit.isMask?'Edit Vector Mask':'Edit Path'); pathEdit.grab=null; }
 function drawPenOverlay(cursor){
-  const src = pen ? pen.layer : ((State.tool==='pathedit' && isPath(activeLayer())) ? activeLayer() : null);
-  const c=ov(); if(!src) return; const s=src.shape; const z=State.zoom||1, r=4/z, hr=3.2/z, lw=1.4/z; const cs=contoursOf(s);
+  const s = pen ? pen.layer.shape : ((State.tool==='pathedit') ? editablePathOf(activeLayer()) : null);
+  const c=ov(); if(!s) return; const z=State.zoom||1, r=4/z, hr=3.2/z, lw=1.4/z; const cs=contoursOf(s);
   c.strokeStyle='#2d7ff9'; c.lineWidth=lw; c.setLineDash([]);
   c.beginPath(); tracePath(c, s.pts, s.closed); if(s.subs) for(const sp of s.subs) tracePath(c, sp, true); c.stroke();
   if(pen && cursor && !pen.dragging && s.pts.length && !s.closed){ const last=s.pts[s.pts.length-1]; c.setLineDash([4/z,3/z]); c.beginPath(); c.moveTo(last.x,last.y); c.lineTo(cursor.x,cursor.y); c.stroke(); c.setLineDash([]); }
@@ -2842,7 +2877,7 @@ function renderToolbar(){
   $('#swapColors').onclick=()=>{ const t=State.fg; setFg(State.bg); State.bg=t; $('#bgWell').style.background=rgbToHex(State.bg); };
 }
 function selectTool(id){ if(pen && id!=='pen') finishPen(); State.tool=id; renderToolbar(); renderOptionsBar();
-  if(id==='pathedit' && isPath(activeLayer())) drawPenOverlay();
+  if(id==='pathedit' && editablePathOf(activeLayer())) drawPenOverlay();
   else if(id==='width'){ if(widthToolTarget()) drawWidthOverlay(); else { ov(); } }
   else if(id!=='pen'){ ov(); drawSelectionOverlay(); } }
 
@@ -2984,6 +3019,7 @@ function renderLayerList(){
     if(l.type==='text'){ const b=document.createElement('span'); b.textContent='T'; b.style.cssText='display:inline-block;width:14px;text-align:center;color:#9ab;font-weight:700;margin-right:4px'; name.appendChild(b); }
     if(l.type==='adjust'){ const b=document.createElement('span'); b.textContent='◐'; b.style.cssText='display:inline-block;width:14px;text-align:center;color:#c9b6f0;margin-right:4px'; name.appendChild(b); }
     if(l.type==='shape'){ const b=document.createElement('span'); b.textContent = l.shape&&l.shape.kind==='ellipse'?'◯':l.shape&&l.shape.kind==='line'?'╱':l.shape&&l.shape.kind==='path'?'✎':'▭'; b.title='Vector shape — double-click to edit fill/stroke'; b.style.cssText='display:inline-block;width:14px;text-align:center;color:#9fe0c0;margin-right:4px'; name.appendChild(b); }
+    if(l.vectorMask){ const b=document.createElement('span'); b.textContent='▱'; b.title='Vector mask — edit with Direct Selection (A)'; b.style.cssText='display:inline-block;width:13px;text-align:center;color:#7fb2e6;margin-right:3px'; name.appendChild(b); }
     name.appendChild(document.createTextNode(l.name));
     name.ondblclick=e=>{e.stopPropagation(); if(l.type==='text'&&l.text)openTextDialog(l); else if(l.type==='adjust')openAdjustmentLayerDialog(l); else if(l.type==='shape'&&l.shape)openShapeDialog(l); else renameLayer(el,l);};
     el.appendChild(name);
@@ -4080,7 +4116,7 @@ function exportAs(type){
 //---- Native project save/load ----
 function serializeProject(){
   return { prism:1, width:State.width, height:State.height, activeId:State.activeId, fileName:State.fileName, guides:State.guides||[],
-    layers:State.layers.map(l=>({id:l.id,name:l.name,visible:l.visible,opacity:l.opacity,blend:l.blend,locked:l.locked,type:l.type,text:l.text,maskActive:l.maskActive,maskFeather:l.maskFeather,maskDensity:l.maskDensity,clipped:l.clipped,styles:l.styles,blendIf:l.blendIf||null,fillOpacity:l.fillOpacity==null?100:l.fillOpacity,smart:l.smart,smartFilters:l.smartFilters,smartSrc:l.smart&&l.smartSource?l.smartSource.toDataURL('image/png'):null,soContentSrc:l.smart&&l.soContent?l.soContent.toDataURL('image/png'):null,soTransform:l.soTransform||null,adjust:l.adjust||null,shape:l.shape||null,groupId:l.groupId||null,expanded:l.expanded,data:l.canvas.toDataURL('image/png'),mask:l.mask?l.mask.toDataURL('image/png'):null})) };
+    layers:State.layers.map(l=>({id:l.id,name:l.name,visible:l.visible,opacity:l.opacity,blend:l.blend,locked:l.locked,type:l.type,text:l.text,maskActive:l.maskActive,maskFeather:l.maskFeather,maskDensity:l.maskDensity,clipped:l.clipped,styles:l.styles,blendIf:l.blendIf||null,fillOpacity:l.fillOpacity==null?100:l.fillOpacity,vectorMask:l.vectorMask||null,smart:l.smart,smartFilters:l.smartFilters,smartSrc:l.smart&&l.smartSource?l.smartSource.toDataURL('image/png'):null,soContentSrc:l.smart&&l.soContent?l.soContent.toDataURL('image/png'):null,soTransform:l.soTransform||null,adjust:l.adjust||null,shape:l.shape||null,groupId:l.groupId||null,expanded:l.expanded,data:l.canvas.toDataURL('image/png'),mask:l.mask?l.mask.toDataURL('image/png'):null})) };
 }
 function saveProject(){
   const blob=new Blob([JSON.stringify(serializeProject())],{type:'application/json'});
@@ -4104,7 +4140,7 @@ function loadProject(text){ try{ loadProjectData(JSON.parse(text)); }catch(e){ t
 function loadProjectData(p){
   try{ State.width=p.width;State.height=p.height; State.layers=[];State.history=[];State.histIndex=-1; if(p.fileName)State.fileName=p.fileName; State.guides=p.guides||[]; resizeCanvases();
     let pending=p.layers.length;
-    p.layers.forEach(sl=>{ const l=newLayer(sl.name); l.id=sl.id;l.visible=sl.visible;l.opacity=sl.opacity;l.blend=sl.blend;l.locked=sl.locked;l.type=sl.type;l.text=sl.text;l.maskActive=!!sl.maskActive;l.maskFeather=sl.maskFeather||0;l.maskDensity=sl.maskDensity==null?100:sl.maskDensity;l.clipped=!!sl.clipped;l.styles=sl.styles||null;l.blendIf=sl.blendIf||null;l.fillOpacity=sl.fillOpacity==null?100:sl.fillOpacity;l.smart=!!sl.smart;l.smartFilters=sl.smartFilters||null;l.adjust=sl.adjust||null;l.soTransform=sl.soTransform||null;l.shape=sl.shape||null;l.groupId=sl.groupId||null;l.expanded=sl.expanded;
+    p.layers.forEach(sl=>{ const l=newLayer(sl.name); l.id=sl.id;l.visible=sl.visible;l.opacity=sl.opacity;l.blend=sl.blend;l.locked=sl.locked;l.type=sl.type;l.text=sl.text;l.maskActive=!!sl.maskActive;l.maskFeather=sl.maskFeather||0;l.maskDensity=sl.maskDensity==null?100:sl.maskDensity;l.clipped=!!sl.clipped;l.styles=sl.styles||null;l.blendIf=sl.blendIf||null;l.fillOpacity=sl.fillOpacity==null?100:sl.fillOpacity;l.vectorMask=sl.vectorMask||null;l.smart=!!sl.smart;l.smartFilters=sl.smartFilters||null;l.adjust=sl.adjust||null;l.soTransform=sl.soTransform||null;l.shape=sl.shape||null;l.groupId=sl.groupId||null;l.expanded=sl.expanded;
       let need=1; if(sl.mask)need++; if(sl.smart&&sl.smartSrc)need++; if(sl.smart&&sl.soContentSrc)need++;
       const done=()=>{ if(--pending===0){composite();renderLayerList();} };
       const img=new Image(); img.onload=()=>{ l.ctx.drawImage(img,0,0); if(--need===0)done(); }; img.src=sl.data;
@@ -4190,6 +4226,11 @@ const MENUS={
     {label:'Mask Feather / Density…',fn:()=>{ const l=activeLayer(); if(l&&l.mask)maskProperties(l); else toast('Layer has no mask'); }},
     {label:'Apply Layer Mask',fn:()=>applyLayerMask()},
     {label:'Delete Layer Mask',fn:()=>deleteLayerMask()},
+    {sub:'Vector Mask'},
+    {label:'Add Vector Mask (Reveal All)',fn:()=>addVectorMask('reveal')},
+    {label:'Add Vector Mask (Hide All)',fn:()=>addVectorMask('hide')},
+    {label:'Current Path → Vector Mask',fn:()=>vectorMaskFromPath()},
+    {label:'Delete Vector Mask',fn:()=>deleteVectorMask()},
     {sub:'Clipping'},
     {label:'Create / Release Clipping Mask',kbd:'⌥⌘G',fn:()=>toggleClipping()},
     {sub:'Smart Object'},
