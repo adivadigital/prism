@@ -3020,20 +3020,25 @@ function buildGroupRow(l, depth){
 }
 //---- Layer colour labels + filtering ----
 const LAYER_LABELS={ red:'#e2565b', orange:'#e58a3a', yellow:'#d9c04a', green:'#5aae5a', blue:'#3a90d9', violet:'#9a6ad9', gray:'#8a8f98' };
-let layerFilter={ color:null, text:'' };
+let layerFilter={ color:null, text:'', kind:'' };
+function kindOf(l){ if(l.smart) return 'smart'; if(l.type==='text')return 'text'; if(l.type==='shape')return 'shape'; if(l.type==='adjust')return 'adjust'; return 'pixel'; }
 function setLayerLabel(l, key){ const val=(key&&key!=='none')?key:null;
   const sel=selectedLayers(); const targets=(sel.length>1 && isLayerSelected(l.id)) ? sel : [l];   // tag the whole selection when it's a multi-select
   for(const t of targets) t.label=val;
   renderLayerList(); pushHistory('Label'); if(targets.length>1) toast('Labeled '+targets.length+' layers'); }
-function layerMatchesFilter(l){ if(layerFilter.color && l.label!==layerFilter.color) return false; if(layerFilter.text && !(l.name||'').toLowerCase().includes(layerFilter.text)) return false; return true; }
-function filterActive(){ return !!(layerFilter.color || layerFilter.text); }
+function layerMatchesFilter(l){ if(layerFilter.color && l.label!==layerFilter.color) return false; if(layerFilter.kind && kindOf(l)!==layerFilter.kind) return false; if(layerFilter.text && !(l.name||'').toLowerCase().includes(layerFilter.text)) return false; return true; }
+function filterActive(){ return !!(layerFilter.color || layerFilter.text || layerFilter.kind); }
 function renderLayerFilterBar(){ const bar=$('#layerFilterBar'); if(!bar) return; bar.innerHTML='';
+  const kinds=[['','Kind'],['pixel','Pixel'],['text','Type'],['shape','Shape'],['adjust','Adjustment'],['smart','Smart Object']];
+  const ksel=document.createElement('select'); ksel.style.cssText='background:var(--panel3);border:1px solid var(--line);color:var(--text);border-radius:4px;font-size:11px;padding:1px 2px';
+  ksel.innerHTML=kinds.map(([v,n])=>`<option value="${v}" ${layerFilter.kind===v?'selected':''}>${n}</option>`).join('');
+  ksel.onchange=()=>{ layerFilter.kind=ksel.value; renderLayerList(); }; bar.appendChild(ksel);
   const dots=document.createElement('div'); dots.style.cssText='display:flex;gap:3px;align-items:center';
   for(const k of Object.keys(LAYER_LABELS)){ const d=document.createElement('span'); d.title='Filter: '+k; d.style.cssText=`width:12px;height:12px;border-radius:50%;cursor:pointer;background:${LAYER_LABELS[k]};box-shadow:${layerFilter.color===k?'0 0 0 2px #fff':'0 0 0 1px rgba(0,0,0,.4)'}`; d.onclick=()=>{ layerFilter.color = layerFilter.color===k?null:k; renderLayerFilterBar(); renderLayerList(); }; dots.appendChild(d); }
   bar.appendChild(dots);
   const inp=document.createElement('input'); inp.type='search'; inp.placeholder='Filter layers…'; inp.value=layerFilter.text; inp.style.cssText='flex:1;min-width:60px;background:var(--panel3);border:1px solid var(--line);color:var(--text);border-radius:4px;padding:2px 6px;font-size:11px';
   inp.oninput=()=>{ layerFilter.text=inp.value.trim().toLowerCase(); renderLayerList(); }; bar.appendChild(inp);
-  if(filterActive()){ const clr=document.createElement('span'); clr.textContent='✕'; clr.title='Clear filter'; clr.style.cssText='cursor:pointer;color:var(--text-dim);padding:0 2px'; clr.onclick=()=>{ layerFilter={color:null,text:''}; const el=$('#layerFilterBar'); renderLayerFilterBar(); renderLayerList(); }; bar.appendChild(clr); }
+  if(filterActive()){ const clr=document.createElement('span'); clr.textContent='✕'; clr.title='Clear filter'; clr.style.cssText='cursor:pointer;color:var(--text-dim);padding:0 2px'; clr.onclick=()=>{ layerFilter={color:null,text:'',kind:''}; renderLayerFilterBar(); renderLayerList(); }; bar.appendChild(clr); }
 }
 function renderLayerList(){
   const list=$('#layerList'); list.innerHTML=''; renderLayerFilterBar(); const filtering=filterActive();
@@ -3102,6 +3107,7 @@ function renderLayerList(){
       });
     }
   });
+  if(filtering && !list.children.length){ const em=document.createElement('div'); em.textContent='No layers match this filter'; em.style.cssText='padding:14px 10px;color:var(--text-dim);font-size:11px;text-align:center'; list.appendChild(em); }
   syncLayerControls(); updateEditTargetIndicator();
 }
 // ---- Multi-layer selection ----
