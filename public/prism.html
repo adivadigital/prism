@@ -1662,7 +1662,7 @@ const Tools = [
   {id:'zoom',name:'Zoom',key:'Z',icon:iZoom},
 ];
 // Brush/tool options
-const Opt = { brushSize:20, brushHardness:80, brushOpacity:100, brushFlow:100, brushSpacing:15, sizeJitter:0, scatter:0, brushAngle:0, brushRoundness:100, angleJitter:0, cropAspect:0, tolerance:32, fontSize:48, fontFamily:'Arial', gradientType:'linear', gradient:{ type:'linear', reverse:false, stops:[{pos:0,color:'#000000',opacity:1},{pos:1,color:'#ffffff',opacity:1}] }, strength:50, zoomStep:1.4, aa:true };
+const Opt = { brushSize:20, brushHardness:80, brushOpacity:100, brushFlow:100, brushSpacing:15, sizeJitter:0, scatter:0, brushAngle:0, brushRoundness:100, angleJitter:0, brushTip:null, cropAspect:0, tolerance:32, fontSize:48, fontFamily:'Arial', gradientType:'linear', gradient:{ type:'linear', reverse:false, stops:[{pos:0,color:'#000000',opacity:1},{pos:1,color:'#ffffff',opacity:1}] }, strength:50, zoomStep:1.4, aa:true };
 
 //====================================================================
 //  POINTER INTERACTION ON STAGE
@@ -1702,8 +1702,18 @@ function paintLine(ctx,x0,y0,x1,y1,mode){
 //==================== BRUSH ENGINE (spacing, jitter, scatter, angle/roundness, flow vs opacity) ====================
 // A stroke paints into an offscreen BUFFER at Flow (buildup), which is composited onto the layer at
 // Opacity — so overlapping dabs build within a stroke but the stroke can't exceed Opacity (true PS model).
-function stampDab(bctx, x, y, size, hardness, flow, angle, roundness, color, erase){
-  const r=size/2; if(r<0.3)return; const ry=Math.max(0.05,(roundness==null?100:roundness)/100);
+//---- Custom brush tips (define a brush from a shape/selection) ----
+const BrushTips=[];
+function saveBrushTips(){ try{ localStorage.setItem('prismBrushTips', JSON.stringify(BrushTips.map(t=>({id:t.id,name:t.name,w:t.w,h:t.h,dataURL:t.dataURL})))); }catch(e){} }
+function loadBrushTips(){ try{ const arr=JSON.parse(localStorage.getItem('prismBrushTips')||'[]'); for(const t of arr){ const tip={...t, _canvas:null}; const im=new Image(); im.onload=()=>{ const c=document.createElement('canvas'); c.width=t.w;c.height=t.h; c.getContext('2d').drawImage(im,0,0); tip._canvas=c; }; im.src=t.dataURL; BrushTips.push(tip); } }catch(e){} }
+function tipById(id){ return BrushTips.find(t=>t.id===id)||null; }
+// a color-tinted copy of a tip (RGB = brush colour, ALPHA = tip coverage); rebuilt per stroke
+function tintedTip(tip, color){ if(!tip||!tip._canvas)return null; const c=document.createElement('canvas'); c.width=tip.w;c.height=tip.h; const cx=c.getContext('2d'); cx.drawImage(tip._canvas,0,0); cx.globalCompositeOperation='source-in'; cx.fillStyle=`rgb(${color.r},${color.g},${color.b})`; cx.fillRect(0,0,tip.w,tip.h); return {canvas:c, w:tip.w, h:tip.h}; }
+function stampDab(bctx, x, y, size, hardness, flow, angle, roundness, color, erase, tip){
+  const ry=Math.max(0.05,(roundness==null?100:roundness)/100);
+  if(tip && tip.canvas){ const s=size/Math.max(tip.w,tip.h); if(s*Math.max(tip.w,tip.h)<0.5)return;
+    bctx.save(); bctx.globalAlpha=flow; bctx.translate(x,y); if(angle)bctx.rotate(angle*Math.PI/180); bctx.scale(s, s*ry); bctx.drawImage(tip.canvas,-tip.w/2,-tip.h/2); bctx.restore(); return; }
+  const r=size/2; if(r<0.3)return;
   bctx.save(); bctx.translate(x,y); if(angle) bctx.rotate(angle*Math.PI/180); if(ry!==1) bctx.scale(1,ry);
   bctx.globalAlpha=flow; const c=erase?{r:0,g:0,b:0}:color;
   if(hardness>=100){ bctx.fillStyle=`rgb(${c.r},${c.g},${c.b})`; }
@@ -1713,15 +1723,33 @@ function stampDab(bctx, x, y, size, hardness, flow, angle, roundness, color, era
 function beginBrushStroke(l, mode){
   const target=editCtx(l); const snap=makeLayerCanvas(); snap.getContext('2d').drawImage(target.canvas,0,0);
   const buf=makeLayerCanvas();
-  pointer.stroke={ snap, buf, bctx:buf.getContext('2d'), target, mode, layer:l, lastX:null, lastY:null, acc:0 };
+  const tip = Opt.brushTip ? tintedTip(tipById(Opt.brushTip), State.fg) : null;
+  pointer.stroke={ snap, buf, bctx:buf.getContext('2d'), target, mode, layer:l, lastX:null, lastY:null, acc:0, tip };
 }
+// Capture the active layer's shape (within the selection, if any) as a reusable brush tip.
+function defineBrushFromSelection(){ const l=activeLayer(); if(!l||!l.canvas||l.type==='group'){ toast('Select a pixel/image layer'); return; }
+  const b = State.selection ? State.selection.bounds : (alphaBounds(l.canvas)||{x:0,y:0,w:State.width,h:State.height});
+  if(b.w<2||b.h<2){ toast('Nothing to define — make a selection or add content'); return; }
+  const src=l.ctx.getImageData(b.x,b.y,b.w,b.h).data; let hasA=false; for(let i=3;i<src.length;i+=4){ if(src[i]<250){hasA=true;break;} }
+  const c=document.createElement('canvas'); c.width=b.w;c.height=b.h; const cx=c.getContext('2d'); const img=cx.createImageData(b.w,b.h); const d=img.data;
+  for(let i=0;i<b.w*b.h;i++){ const p=i*4; const lum=src[p]*0.299+src[p+1]*0.587+src[p+2]*0.114; let a = hasA ? src[p+3] : (255-lum);
+    if(State.selection){ const gx=b.x+(i%b.w), gy=b.y+((i/b.w)|0); a=a*(State.selection.mask[gy*State.width+gx]/255); }
+    d[p]=d[p+1]=d[p+2]=255; d[p+3]=a; }
+  let cover=0; for(let i=3;i<d.length;i+=4){ if(d[i]>10)cover++; }
+  if(cover < b.w*b.h*0.002){ toast(hasA?'That area is nearly empty — select the subject':'That area is nearly white — a brush tip comes from the darker shape (or use a cutout on transparency)'); return; }
+  cx.putImageData(img,0,0);
+  const tip={ id:'bt'+Date.now(), name:'Brush '+(BrushTips.length+1), w:b.w, h:b.h, dataURL:c.toDataURL('image/png'), _canvas:c };
+  BrushTips.push(tip); saveBrushTips(); Opt.brushTip=tip.id; Opt.brushSize=Math.max(Opt.brushSize, Math.min(400,Math.max(b.w,b.h)));
+  if(!['brush','eraser'].includes(State.tool)) selectTool('brush'); renderOptionsBar(); toast('Brush defined: '+tip.name);
+}
+function deleteBrushTip(id){ const i=BrushTips.findIndex(t=>t.id===id); if(i>=0){ BrushTips.splice(i,1); saveBrushTips(); if(Opt.brushTip===id)Opt.brushTip=null; renderOptionsBar(); } }
 function brushStrokeSegment(x0,y0,x1,y1){
   const st=pointer.stroke; if(!st)return; const base=Opt.brushSize, flow=Math.max(0.02,Opt.brushFlow/100), hard=Opt.brushHardness;
   const spacing=Math.max(0.5, base*Math.max(1,Opt.brushSpacing||15)/100);
   const dab=(x,y)=>{ let size=base; if(Opt.sizeJitter) size=Math.max(1,base*(1-Opt.sizeJitter/100*Math.random()));
     let dx=x,dy=y; if(Opt.scatter){ const a=Math.random()*7, rr=Math.random()*(Opt.scatter/100)*base; dx+=Math.cos(a)*rr; dy+=Math.sin(a)*rr; }
     let ang=Opt.brushAngle||0; if(Opt.angleJitter) ang+=(Math.random()-0.5)*Opt.angleJitter*3.6;
-    stampDab(st.bctx,dx,dy,size,hard,flow,ang,Opt.brushRoundness,State.fg,st.mode==='erase'); };
+    stampDab(st.bctx,dx,dy,size,hard,flow,ang,Opt.brushRoundness,State.fg,st.mode==='erase',st.tip); };
   if(st.lastX==null){ dab(x0,y0); st.lastX=x0; st.lastY=y0; st.acc=0; }
   const dxs=x1-st.lastX, dys=y1-st.lastY, dist=Math.hypot(dxs,dys); if(dist===0)return;
   const ux=dxs/dist, uy=dys/dist; let t=spacing-st.acc;
@@ -2923,7 +2951,9 @@ function renderOptionsBar(){
     html+=`<label>Size <input type="range" id="oSize" min="1" max="400" value="${Opt.brushSize}"><span class="val" id="oSizeV">${Opt.brushSize}</span></label>`;
     if(['brush','eraser','clone'].includes(State.tool)) html+=`<label>Hardness <input type="range" id="oHard" min="0" max="100" value="${Opt.brushHardness}"><span class="val" id="oHardV">${Opt.brushHardness}</span></label>`;
     if(['brush','pencil','eraser','clone','heal'].includes(State.tool)) html+=`<label>Opacity <input type="range" id="oOpac" min="1" max="100" value="${Opt.brushOpacity}"><span class="val" id="oOpacV">${Opt.brushOpacity}</span></label>`;
-    if(['brush','eraser'].includes(State.tool)){ html+=`<label>Flow <input type="range" id="oFlow" min="1" max="100" value="${Opt.brushFlow}"><span class="val" id="oFlowV">${Opt.brushFlow}</span></label><button id="oDyn" title="Brush dynamics">Dynamics…</button>`; }
+    if(['brush','eraser'].includes(State.tool)){ html+=`<label>Flow <input type="range" id="oFlow" min="1" max="100" value="${Opt.brushFlow}"><span class="val" id="oFlowV">${Opt.brushFlow}</span></label><button id="oDyn" title="Brush dynamics">Dynamics…</button>`;
+      const tips=BrushTips.map(t=>`<option value="${t.id}" ${Opt.brushTip===t.id?'selected':''}>${t.name}</option>`).join('');
+      html+=`<label>Tip <select id="oTip"><option value="" ${!Opt.brushTip?'selected':''}>Round</option>${tips}</select></label><button id="oDefBrush" title="Define brush from selection/layer">Define…</button>${Opt.brushTip?'<button id="oDelBrush" title="Delete this brush tip">✕</button>':''}`; }
     if(['blur','smudge','dodge','burn'].includes(State.tool)) html+=`<label>Strength <input type="range" id="oStr" min="1" max="100" value="${Opt.strength}"><span class="val" id="oStrV">${Opt.strength}</span></label>`;
   }
   if(['wand','bucket'].includes(State.tool)) html+=`<label>Tolerance <input type="range" id="oTol" min="0" max="150" value="${Opt.tolerance}"><span class="val" id="oTolV">${Opt.tolerance}</span></label>`;
@@ -2938,6 +2968,9 @@ function renderOptionsBar(){
   const bind=(id,vid,key,fn)=>{ const el=$('#'+id); if(!el)return; el.oninput=()=>{ Opt[key]=+el.value; if(vid)$('#'+vid).textContent=el.value; if(fn)fn(); }; };
   bind('oSize','oSizeV','brushSize'); bind('oHard','oHardV','brushHardness'); bind('oOpac','oOpacV','brushOpacity'); bind('oStr','oStrV','strength'); bind('oTol','oTolV','tolerance'); bind('oFlow','oFlowV','brushFlow');
   if($('#oDyn')) $('#oDyn').onclick=brushDynamicsDialog;
+  if($('#oTip')) $('#oTip').onchange=e=>{ Opt.brushTip=e.target.value||null; renderOptionsBar(); };
+  if($('#oDefBrush')) $('#oDefBrush').onclick=defineBrushFromSelection;
+  if($('#oDelBrush')) $('#oDelBrush').onclick=()=>deleteBrushTip(Opt.brushTip);
   if($('#oGrad'))$('#oGrad').onchange=e=>{ curGradient().type=e.target.value; Opt.gradientType=e.target.value; };
   if($('#oGradRev'))$('#oGradRev').onchange=e=>{ curGradient().reverse=e.target.checked; };
   if($('#oGradSwatch')){ paintGradientSwatch($('#oGradSwatch'), curGradient().stops); $('#oGradSwatch').onclick=()=>openGradientEditor(()=>renderOptionsBar()); }
@@ -4220,6 +4253,8 @@ const MENUS={
     {sep:1},
     {label:'Free Transform',kbd:'⌘T',fn:()=>enterFreeTransform()},
     {label:'Transform (numeric)…',fn:()=>transformDialog()},
+    {sep:1},
+    {label:'Define Brush from Selection',fn:()=>defineBrushFromSelection()},
   ],
   image:[
     {sub:'Adjustments'},
@@ -4831,6 +4866,7 @@ window.PrismAPI = (function(){
 
 function init(){
   _suppressAutosave=true;                        // don't let the startup blank doc clobber a saved session
+  loadBrushTips();
   buildMenus(); renderToolbar(); renderOptionsBar(); renderSwatches();
   setFg({r:0,g:0,b:0}); updateColorPanel();
   newDocument(800,600,'white'); renderTabs();
