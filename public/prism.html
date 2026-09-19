@@ -264,6 +264,7 @@
             </select>
             <div class="op">Op<input id="layerOpacity" type="number" min="0" max="100" value="100">%</div>
           </div>
+          <div id="layerFilterBar" style="display:flex;align-items:center;gap:4px;padding:4px 8px;border-bottom:1px solid var(--line)"></div>
           <div id="layerList"></div>
           <div id="layerToolbar">
             <div class="lbtn" id="lbLink" title="Link">🔗</div>
@@ -3017,15 +3018,33 @@ function buildGroupRow(l, depth){
   el.oncontextmenu=ev=>{ ev.preventDefault(); ev.stopPropagation(); setActiveLayer(l.id); layerContextMenu(l); };
   return el;
 }
+//---- Layer colour labels + filtering ----
+const LAYER_LABELS={ red:'#e2565b', orange:'#e58a3a', yellow:'#d9c04a', green:'#5aae5a', blue:'#3a90d9', violet:'#9a6ad9', gray:'#8a8f98' };
+let layerFilter={ color:null, text:'' };
+function setLayerLabel(l, key){ const val=(key&&key!=='none')?key:null;
+  const sel=selectedLayers(); const targets=(sel.length>1 && isLayerSelected(l.id)) ? sel : [l];   // tag the whole selection when it's a multi-select
+  for(const t of targets) t.label=val;
+  renderLayerList(); pushHistory('Label'); if(targets.length>1) toast('Labeled '+targets.length+' layers'); }
+function layerMatchesFilter(l){ if(layerFilter.color && l.label!==layerFilter.color) return false; if(layerFilter.text && !(l.name||'').toLowerCase().includes(layerFilter.text)) return false; return true; }
+function filterActive(){ return !!(layerFilter.color || layerFilter.text); }
+function renderLayerFilterBar(){ const bar=$('#layerFilterBar'); if(!bar) return; bar.innerHTML='';
+  const dots=document.createElement('div'); dots.style.cssText='display:flex;gap:3px;align-items:center';
+  for(const k of Object.keys(LAYER_LABELS)){ const d=document.createElement('span'); d.title='Filter: '+k; d.style.cssText=`width:12px;height:12px;border-radius:50%;cursor:pointer;background:${LAYER_LABELS[k]};box-shadow:${layerFilter.color===k?'0 0 0 2px #fff':'0 0 0 1px rgba(0,0,0,.4)'}`; d.onclick=()=>{ layerFilter.color = layerFilter.color===k?null:k; renderLayerFilterBar(); renderLayerList(); }; dots.appendChild(d); }
+  bar.appendChild(dots);
+  const inp=document.createElement('input'); inp.type='search'; inp.placeholder='Filter layers…'; inp.value=layerFilter.text; inp.style.cssText='flex:1;min-width:60px;background:var(--panel3);border:1px solid var(--line);color:var(--text);border-radius:4px;padding:2px 6px;font-size:11px';
+  inp.oninput=()=>{ layerFilter.text=inp.value.trim().toLowerCase(); renderLayerList(); }; bar.appendChild(inp);
+  if(filterActive()){ const clr=document.createElement('span'); clr.textContent='✕'; clr.title='Clear filter'; clr.style.cssText='cursor:pointer;color:var(--text-dim);padding:0 2px'; clr.onclick=()=>{ layerFilter={color:null,text:''}; const el=$('#layerFilterBar'); renderLayerFilterBar(); renderLayerList(); }; bar.appendChild(clr); }
+}
 function renderLayerList(){
-  const list=$('#layerList'); list.innerHTML='';
+  const list=$('#layerList'); list.innerHTML=''; renderLayerFilterBar(); const filtering=filterActive();
   [...State.layers].reverse().forEach(l=>{
-    // Hide anything inside a collapsed group (at any nesting level)
-    if(anyAncestorCollapsed(l)) return;
-    const depth=groupDepth(l);
+    if(filtering){ if(l.type==='group' || !layerMatchesFilter(l)) return; }   // filtering flattens: matching non-group layers only
+    else if(anyAncestorCollapsed(l)) return;   // hide anything inside a collapsed group (any nesting level)
+    const depth=filtering?0:groupDepth(l);
     // Group header (folder) row
     if(l.type==='group'){ list.appendChild(buildGroupRow(l, depth)); return; }
     const el=document.createElement('div'); el.className='layer'+(isLayerSelected(l.id)?' active':'')+(l.id===State.activeId?' primary':'')+(depth?' grouped':''); el.dataset.id=l.id;
+    if(l.label && LAYER_LABELS[l.label]) el.style.borderLeft='3px solid '+LAYER_LABELS[l.label];
     const indent=depth*16;
     if(indent) el.style.paddingLeft=(10+indent)+'px';
     if(l.clipped){ el.style.paddingLeft=(22+indent)+'px'; const clip=document.createElement('span'); clip.textContent='↳'; clip.title='Clipped to layer below (Alt-click row or ⌥⌘G to release)'; clip.style.cssText='position:absolute;left:'+(8+indent)+'px;color:#8fb2e0;font-weight:700'; el.style.position='relative'; el.appendChild(clip); }
@@ -3419,6 +3438,10 @@ function layerContextMenu(l){
     <button class="qadj" id="lcStyles">Blending Options (Layer Styles)…</button>
     <button class="qadj" id="lcDup">Duplicate Layer</button>
     <button class="qadj" id="lcDel">Delete Layer</button>
+    <div style="margin-top:4px"><div style="color:var(--text-dim);font-size:11px;margin-bottom:4px">Color label</div><div id="lcLabels" style="display:flex;gap:6px;align-items:center">
+      <span data-k="none" title="None" style="width:18px;height:18px;border-radius:50%;cursor:pointer;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;color:var(--text-dim);font-size:11px">✕</span>
+      ${Object.keys(LAYER_LABELS).map(k=>`<span data-k="${k}" title="${k}" style="width:18px;height:18px;border-radius:50%;cursor:pointer;background:${LAYER_LABELS[k]};box-shadow:${l.label===k?'0 0 0 2px #fff':'0 0 0 1px rgba(0,0,0,.4)'}"></span>`).join('')}
+    </div></div>
   </div><div style="color:var(--text-dim);margin-top:8px;font-size:11px">Tip: Alt-click a layer, or press ⌥⌘G, to clip it to the layer below.</div></div>`, null, 'Close');
   setTimeout(()=>{
     const clip=$('#lcClip'); if(clip&&canClip) clip.onclick=()=>{hideDialog(); toggleClippingFor(l);};
@@ -3427,6 +3450,7 @@ function layerContextMenu(l){
     $('#lcStyles').onclick=()=>{hideDialog(); openLayerStyles(l);};
     $('#lcDup').onclick=()=>{hideDialog(); setActiveLayer(l.id); duplicateLayer();};
     $('#lcDel').onclick=()=>{hideDialog(); setActiveLayer(l.id); deleteLayer();};
+    const lab=$('#lcLabels'); if(lab) lab.querySelectorAll('[data-k]').forEach(s=>s.onclick=()=>{ setLayerLabel(l, s.dataset.k); hideDialog(); });
   },10);
 }
 
@@ -4183,7 +4207,7 @@ function saveForWebDialog(){
 //---- Native project save/load ----
 function serializeProject(){
   return { prism:1, width:State.width, height:State.height, activeId:State.activeId, fileName:State.fileName, guides:State.guides||[],
-    layers:State.layers.map(l=>({id:l.id,name:l.name,visible:l.visible,opacity:l.opacity,blend:l.blend,locked:l.locked,type:l.type,text:l.text,maskActive:l.maskActive,maskFeather:l.maskFeather,maskDensity:l.maskDensity,clipped:l.clipped,styles:l.styles,blendIf:l.blendIf||null,fillOpacity:l.fillOpacity==null?100:l.fillOpacity,vectorMask:l.vectorMask||null,smart:l.smart,smartFilters:l.smartFilters,smartSrc:l.smart&&l.smartSource?l.smartSource.toDataURL('image/png'):null,soContentSrc:l.smart&&l.soContent?l.soContent.toDataURL('image/png'):null,soTransform:l.soTransform||null,adjust:l.adjust||null,shape:l.shape||null,groupId:l.groupId||null,expanded:l.expanded,data:l.canvas.toDataURL('image/png'),mask:l.mask?l.mask.toDataURL('image/png'):null})) };
+    layers:State.layers.map(l=>({id:l.id,name:l.name,visible:l.visible,opacity:l.opacity,blend:l.blend,locked:l.locked,type:l.type,text:l.text,maskActive:l.maskActive,maskFeather:l.maskFeather,maskDensity:l.maskDensity,clipped:l.clipped,label:l.label||null,styles:l.styles,blendIf:l.blendIf||null,fillOpacity:l.fillOpacity==null?100:l.fillOpacity,vectorMask:l.vectorMask||null,smart:l.smart,smartFilters:l.smartFilters,smartSrc:l.smart&&l.smartSource?l.smartSource.toDataURL('image/png'):null,soContentSrc:l.smart&&l.soContent?l.soContent.toDataURL('image/png'):null,soTransform:l.soTransform||null,adjust:l.adjust||null,shape:l.shape||null,groupId:l.groupId||null,expanded:l.expanded,data:l.canvas.toDataURL('image/png'),mask:l.mask?l.mask.toDataURL('image/png'):null})) };
 }
 function saveProject(){
   const blob=new Blob([JSON.stringify(serializeProject())],{type:'application/json'});
@@ -4207,7 +4231,7 @@ function loadProject(text){ try{ loadProjectData(JSON.parse(text)); }catch(e){ t
 function loadProjectData(p){
   try{ State.width=p.width;State.height=p.height; State.layers=[];State.history=[];State.histIndex=-1; if(p.fileName)State.fileName=p.fileName; State.guides=p.guides||[]; resizeCanvases();
     let pending=p.layers.length;
-    p.layers.forEach(sl=>{ const l=newLayer(sl.name); l.id=sl.id;l.visible=sl.visible;l.opacity=sl.opacity;l.blend=sl.blend;l.locked=sl.locked;l.type=sl.type;l.text=sl.text;l.maskActive=!!sl.maskActive;l.maskFeather=sl.maskFeather||0;l.maskDensity=sl.maskDensity==null?100:sl.maskDensity;l.clipped=!!sl.clipped;l.styles=sl.styles||null;l.blendIf=sl.blendIf||null;l.fillOpacity=sl.fillOpacity==null?100:sl.fillOpacity;l.vectorMask=sl.vectorMask||null;l.smart=!!sl.smart;l.smartFilters=sl.smartFilters||null;l.adjust=sl.adjust||null;l.soTransform=sl.soTransform||null;l.shape=sl.shape||null;l.groupId=sl.groupId||null;l.expanded=sl.expanded;
+    p.layers.forEach(sl=>{ const l=newLayer(sl.name); l.id=sl.id;l.visible=sl.visible;l.opacity=sl.opacity;l.blend=sl.blend;l.locked=sl.locked;l.type=sl.type;l.text=sl.text;l.maskActive=!!sl.maskActive;l.maskFeather=sl.maskFeather||0;l.maskDensity=sl.maskDensity==null?100:sl.maskDensity;l.clipped=!!sl.clipped;l.label=sl.label||null;l.styles=sl.styles||null;l.blendIf=sl.blendIf||null;l.fillOpacity=sl.fillOpacity==null?100:sl.fillOpacity;l.vectorMask=sl.vectorMask||null;l.smart=!!sl.smart;l.smartFilters=sl.smartFilters||null;l.adjust=sl.adjust||null;l.soTransform=sl.soTransform||null;l.shape=sl.shape||null;l.groupId=sl.groupId||null;l.expanded=sl.expanded;
       let need=1; if(sl.mask)need++; if(sl.smart&&sl.smartSrc)need++; if(sl.smart&&sl.soContentSrc)need++;
       const done=()=>{ if(--pending===0){composite();renderLayerList();} };
       const img=new Image(); img.onload=()=>{ l.ctx.drawImage(img,0,0); if(--need===0)done(); }; img.src=sl.data;
