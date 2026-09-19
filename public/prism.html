@@ -1119,6 +1119,49 @@ function recomputeBounds(){
   for(let i=0;i<m.length;i++)if(m[i]>0){any=true;const x=i%W,y=(i/W)|0;minx=Math.min(minx,x);miny=Math.min(miny,y);maxx=Math.max(maxx,x);maxy=Math.max(maxy,y);}
   if(!any){State.selection=null;return;} State.selection.bounds={x:minx,y:miny,w:maxx-minx+1,h:maxy-miny+1};
 }
+//==================== SELECT SUBJECT / REMOVE BACKGROUND ====================
+// Flood the background inward from every border pixel (region-grow within tolerance, so soft
+// gradients are followed), then the subject = everything the flood couldn't reach.
+function subjectSource(){ const l=activeLayer(); if(!l||l.type==='group'||l.type==='adjust'){ toast('Select a pixel/image layer'); return null; } return l; }
+function computeSubjectMask(l, tol, feather, contract){
+  const W=State.width,H=State.height; const data=l.canvas.getContext('2d').getImageData(0,0,W,H).data;
+  // reference background colour = mean of the border pixels (studio sweep / seamless)
+  let br=0,bgc=0,bb=0,bn=0; const addB=i=>{ const p=i*4; if(data[p+3]<8)return; br+=data[p];bgc+=data[p+1];bb+=data[p+2];bn++; };
+  for(let x=0;x<W;x++){ addB(x); addB((H-1)*W+x); } for(let y=0;y<H;y++){ addB(y*W); addB(y*W+W-1); }
+  if(bn){ br/=bn;bgc/=bn;bb/=bn; }
+  const t2=Math.max(1,(tol*2.2)*(tol*2.2));
+  const isBg=i=>{ const p=i*4; if(data[p+3]<8)return true; const dr=data[p]-br,dg=data[p+1]-bgc,db=data[p+2]-bb; return dr*dr+dg*dg+db*db<=t2; };  // close to the bg colour (or transparent)
+  const visited=new Uint8Array(W*H), stack=[];
+  const seed=i=>{ if(!visited[i] && isBg(i)){ visited[i]=1; stack.push(i); } };
+  for(let x=0;x<W;x++){ seed(x); seed((H-1)*W+x); } for(let y=0;y<H;y++){ seed(y*W); seed(y*W+W-1); }
+  while(stack.length){ const i=stack.pop(), x=i%W, y=(i/W)|0;
+    if(x>0)seed(i-1); if(x<W-1)seed(i+1); if(y>0)seed(i-W); if(y<H-1)seed(i+W); }
+  let m=new Uint8ClampedArray(W*H);
+  for(let i=0;i<W*H;i++){ m[i] = visited[i] ? 0 : (data[i*4+3]>8 ? 255 : 0); }
+  if(contract) m=growMask(m, -Math.abs(contract));
+  if(feather>0) m=blurMask(m, feather);
+  return m;
+}
+function setSubjectSelection(m){ let any=false; for(let i=0;i<m.length;i++) if(m[i]>10){any=true;break;} State.selection = any ? {mask:m, bounds:{x:0,y:0,w:State.width,h:State.height}} : null; if(any) recomputeBounds(); drawSelectionOverlay(); }
+function selectSubject(){ const l=subjectSource(); if(!l)return; toast('Selecting subject…'); setTimeout(()=>{ setSubjectSelection(computeSubjectMask(l, 32, 1, 1)); pushHistory('Select Subject'); toast(State.selection?'Subject selected':'Nothing found — try Remove Background… to tune'); },20); }
+function removeBackgroundDialog(){
+  const l=subjectSource(); if(!l)return;
+  const prevSel=State.selection;
+  showDialog(`<h3>Remove Background — ${l.name}</h3><div class="dbody" style="min-width:280px">
+    ${sliderRow('Tolerance','rbTol',1,120,32)}
+    ${sliderRow('Edge Feather (px)','rbFeather',0,10,1)}
+    ${sliderRow('Shrink Edge (px)','rbContract',0,6,1)}
+    <div class="row"><label>Apply as</label><select id="rbOut"><option value="mask">Layer Mask (non-destructive)</option><option value="selection">Selection</option><option value="erase">Erase Background</option></select></div>
+    <div class="row" style="color:var(--text-dim);font-size:11px">Live preview shows the kept subject as marching ants.</div>
+  </div>`,
+  ()=>{ const m=computeSubjectMask(l, +$('#rbTol').value, +$('#rbFeather').value, +$('#rbContract').value); const out=$('#rbOut').value;
+    if(out==='selection'){ setSubjectSelection(m); pushHistory('Select Subject'); }
+    else if(out==='mask'){ State.selection={mask:m,bounds:{x:0,y:0,w:State.width,h:State.height}}; recomputeBounds(); if(l.mask){ l.maskCtx.drawImage(maskToCanvas(m),0,0); l._maskDirty=true; } else addMaskToLayer(l,'white'); State.selection=prevSel; l._fxDirty=true; renderLayerList(); composite(); pushHistory('Remove Background'); toast('Background removed (layer mask added)'); }
+    else { const mc=maskToCanvas(m); l.ctx.globalCompositeOperation='destination-in'; l.ctx.drawImage(mc,0,0); l.ctx.globalCompositeOperation='source-over'; l._fxDirty=true; State.selection=prevSel; composite(); renderLayerList(); pushHistory('Erase Background'); toast('Background erased'); }
+  }, 'Apply', ()=>{ State.selection=prevSel; drawSelectionOverlay(); });
+  const upd=()=>{ ['rbTol','rbFeather','rbContract'].forEach(id=>{const v=$('#'+id+'V'); if(v)v.textContent=$('#'+id).value;}); setSubjectSelection(computeSubjectMask(l, +$('#rbTol').value, +$('#rbFeather').value, +$('#rbContract').value)); };
+  setTimeout(()=>{ ['rbTol','rbFeather','rbContract'].forEach(id=>{const e=$('#'+id); if(e)e.oninput=upd;}); $('#rbOut')&&($('#rbOut').onchange=()=>{}); upd(); },10);
+}
 
 //====================================================================
 //  PIXEL OPERATIONS (adjustments + filters)
@@ -1604,7 +1647,7 @@ const Tools = [
   {id:'zoom',name:'Zoom',key:'Z',icon:iZoom},
 ];
 // Brush/tool options
-const Opt = { brushSize:20, brushHardness:80, brushOpacity:100, brushFlow:100, tolerance:32, fontSize:48, fontFamily:'Arial', gradientType:'linear', gradient:{ type:'linear', reverse:false, stops:[{pos:0,color:'#000000',opacity:1},{pos:1,color:'#ffffff',opacity:1}] }, strength:50, zoomStep:1.4, aa:true };
+const Opt = { brushSize:20, brushHardness:80, brushOpacity:100, brushFlow:100, brushSpacing:15, sizeJitter:0, scatter:0, brushAngle:0, brushRoundness:100, angleJitter:0, cropAspect:0, tolerance:32, fontSize:48, fontFamily:'Arial', gradientType:'linear', gradient:{ type:'linear', reverse:false, stops:[{pos:0,color:'#000000',opacity:1},{pos:1,color:'#ffffff',opacity:1}] }, strength:50, zoomStep:1.4, aa:true };
 
 //====================================================================
 //  POINTER INTERACTION ON STAGE
@@ -1640,6 +1683,53 @@ function paintLine(ctx,x0,y0,x1,y1,mode){
     else { ctx.globalCompositeOperation='source-over'; brushStampCtx(ctx,x,y,color,size,hardness,alpha); }
   }
   ctx.restore();
+}
+//==================== BRUSH ENGINE (spacing, jitter, scatter, angle/roundness, flow vs opacity) ====================
+// A stroke paints into an offscreen BUFFER at Flow (buildup), which is composited onto the layer at
+// Opacity — so overlapping dabs build within a stroke but the stroke can't exceed Opacity (true PS model).
+function stampDab(bctx, x, y, size, hardness, flow, angle, roundness, color, erase){
+  const r=size/2; if(r<0.3)return; const ry=Math.max(0.05,(roundness==null?100:roundness)/100);
+  bctx.save(); bctx.translate(x,y); if(angle) bctx.rotate(angle*Math.PI/180); if(ry!==1) bctx.scale(1,ry);
+  bctx.globalAlpha=flow; const c=erase?{r:0,g:0,b:0}:color;
+  if(hardness>=100){ bctx.fillStyle=`rgb(${c.r},${c.g},${c.b})`; }
+  else { const g=bctx.createRadialGradient(0,0,r*hardness/100,0,0,r); g.addColorStop(0,`rgba(${c.r},${c.g},${c.b},1)`); g.addColorStop(1,`rgba(${c.r},${c.g},${c.b},0)`); bctx.fillStyle=g; }
+  bctx.beginPath(); bctx.arc(0,0,r,0,7); bctx.fill(); bctx.restore();
+}
+function beginBrushStroke(l, mode){
+  const target=editCtx(l); const snap=makeLayerCanvas(); snap.getContext('2d').drawImage(target.canvas,0,0);
+  const buf=makeLayerCanvas();
+  pointer.stroke={ snap, buf, bctx:buf.getContext('2d'), target, mode, layer:l, lastX:null, lastY:null, acc:0 };
+}
+function brushStrokeSegment(x0,y0,x1,y1){
+  const st=pointer.stroke; if(!st)return; const base=Opt.brushSize, flow=Math.max(0.02,Opt.brushFlow/100), hard=Opt.brushHardness;
+  const spacing=Math.max(0.5, base*Math.max(1,Opt.brushSpacing||15)/100);
+  const dab=(x,y)=>{ let size=base; if(Opt.sizeJitter) size=Math.max(1,base*(1-Opt.sizeJitter/100*Math.random()));
+    let dx=x,dy=y; if(Opt.scatter){ const a=Math.random()*7, rr=Math.random()*(Opt.scatter/100)*base; dx+=Math.cos(a)*rr; dy+=Math.sin(a)*rr; }
+    let ang=Opt.brushAngle||0; if(Opt.angleJitter) ang+=(Math.random()-0.5)*Opt.angleJitter*3.6;
+    stampDab(st.bctx,dx,dy,size,hard,flow,ang,Opt.brushRoundness,State.fg,st.mode==='erase'); };
+  if(st.lastX==null){ dab(x0,y0); st.lastX=x0; st.lastY=y0; st.acc=0; }
+  const dxs=x1-st.lastX, dys=y1-st.lastY, dist=Math.hypot(dxs,dys); if(dist===0)return;
+  const ux=dxs/dist, uy=dys/dist; let t=spacing-st.acc;
+  while(t<=dist){ dab(st.lastX+ux*t, st.lastY+uy*t); t+=spacing; }
+  st.acc = dist-(t-spacing); st.lastX=x1; st.lastY=y1;
+}
+function previewBrushStroke(){ const st=pointer.stroke; if(!st)return; const t=st.target, W=State.width,H=State.height, op=Opt.brushOpacity/100;
+  t.globalAlpha=1; t.globalCompositeOperation='source-over'; t.clearRect(0,0,W,H); t.drawImage(st.snap,0,0);
+  t.globalAlpha=op; t.globalCompositeOperation=(st.mode==='erase')?'destination-out':'source-over'; t.drawImage(st.buf,0,0);
+  t.globalAlpha=1; t.globalCompositeOperation='source-over'; afterEdit(st.layer);
+}
+function endBrushStroke(){ if(!pointer.stroke)return; previewBrushStroke(); pointer.stroke=null; }
+function brushDynamicsDialog(){
+  showDialog(`<h3>Brush Dynamics</h3><div class="dbody" style="min-width:260px">
+    ${sliderRow('Spacing (%)','dySpace',1,200,Opt.brushSpacing)}
+    ${sliderRow('Size Jitter (%)','dySize',0,100,Opt.sizeJitter)}
+    ${sliderRow('Scatter (%)','dyScat',0,300,Opt.scatter)}
+    ${sliderRow('Angle (°)','dyAng',0,360,Opt.brushAngle)}
+    ${sliderRow('Roundness (%)','dyRound',5,100,Opt.brushRoundness)}
+    ${sliderRow('Angle Jitter (%)','dyAJ',0,100,Opt.angleJitter)}
+  </div>`, ()=>{}, 'Done');
+  setTimeout(()=>{ const m=[['dySpace','brushSpacing'],['dySize','sizeJitter'],['dyScat','scatter'],['dyAng','brushAngle'],['dyRound','brushRoundness'],['dyAJ','angleJitter']];
+    m.forEach(([id,key])=>{ const e=$('#'+id); if(e)e.oninput=()=>{ Opt[key]=+e.value; const v=$('#'+id+'V'); if(v)v.textContent=e.value; }; }); },10);
 }
 function floodFill(sx,sy,color,tol){
   const l=activeLayer(); if(!l)return; const ctx=editCtx(l); const W=State.width,H=State.height;
@@ -1805,7 +1895,8 @@ function onPointerDown(e){
   if(tool==='heal'){ if(e.altKey){ pointer.cloneSrc={x:p.x,y:p.y}; toast('Heal source set'); pointer.down=false; return; } if(!pointer.cloneSrc){toast('Alt-click to set the source point');pointer.down=false;return;} pointer.cloneOffset={dx:p.x-pointer.cloneSrc.x, dy:p.y-pointer.cloneSrc.y}; healStamp(p.x,p.y); }
   if(tool==='patch'){ if(State.selection && selectionMaskAt(p.x,p.y)>127){ pointer.patchStart=p; return; } pointer.polyPoints=[{x:p.x,y:p.y}]; return; }
 
-  if(['brush','pencil','eraser'].includes(tool)){ if(!l||l.locked){toast('Layer locked');pointer.down=false;return;} const mode=tool==='eraser'?'erase':(tool==='pencil'?'pencil':'brush'); paintLine(editCtx(l),p.x,p.y,p.x,p.y,mode); afterEdit(l); }
+  if(tool==='pencil'){ if(!l||l.locked){toast('Layer locked');pointer.down=false;return;} paintLine(editCtx(l),p.x,p.y,p.x,p.y,'pencil'); afterEdit(l); }
+  else if(tool==='brush'||tool==='eraser'){ if(!l||l.locked){toast('Layer locked');pointer.down=false;return;} beginBrushStroke(l, tool==='eraser'?'erase':'brush'); brushStrokeSegment(p.x,p.y,p.x,p.y); previewBrushStroke(); }
   if(tool==='clone'){ cloneStamp(p.x,p.y); }
   if(['blur'].includes(tool)) localFilterStamp(p.x,p.y,'blur');
   if(tool==='dodge') localFilterStamp(p.x,p.y,'dodge');
@@ -1825,7 +1916,7 @@ function onPointerMove(e){
 
   if(tool==='marquee'){ drawMarqueePreview(pointer.ix,pointer.iy,p.x,p.y,'rect'); return; }
   if(tool==='ellipse-marquee'){ drawMarqueePreview(pointer.ix,pointer.iy,p.x,p.y,'ellipse'); return; }
-  if(tool==='crop'){ drawCropPreview(pointer.ix,pointer.iy,p.x,p.y); return; }
+  if(tool==='crop'){ const e=cropEnd(pointer.ix,pointer.iy,p.x,p.y); drawCropPreview(pointer.ix,pointer.iy,e.x1,e.y1); return; }
   if(tool.startsWith('shape')){ drawShapePreview(pointer.ix,pointer.iy,p.x,p.y); return; }
   if(tool==='gradient'){ drawGradientPreview(pointer.ix,pointer.iy,p.x,p.y); return; }
   if(tool==='lasso'){ pointer.polyPoints.push({x:p.x,y:p.y}); drawLassoPreview(pointer.polyPoints); return; }
@@ -1834,7 +1925,8 @@ function onPointerMove(e){
   if(tool==='patch'){ if(pointer.patchStart){ const c=ov(); c.strokeStyle='#2d7ff9'; c.setLineDash([4,3]); const dx=p.x-pointer.patchStart.x, dy=p.y-pointer.patchStart.y; const b=State.selection.bounds; c.strokeRect(b.x+dx,b.y+dy,b.w,b.h); c.setLineDash([]); } else if(pointer.polyPoints){ pointer.polyPoints.push({x:p.x,y:p.y}); drawLassoPreview(pointer.polyPoints); } return; }
   if(tool==='move'){ if(pointer.moveSet){ let dx=p.x-pointer.ix, dy=p.y-pointer.iy; if(pointer.moveBounds0){ const s=snapDelta(pointer.moveBounds0,dx,dy); dx=s.dx; dy=s.dy; } applyMoveSet(dx,dy,false); composite(); refreshGuidesUI(); } }
   if(['brush','pencil','eraser'].includes(tool) && State.quickMask){ quickMaskStamp(pointer.lastIx,pointer.lastIy,p.x,p.y, tool==='eraser'); pointer.lastIx=p.x; pointer.lastIy=p.y; return; }
-  if(['brush','pencil','eraser'].includes(tool)){ if(l&&!l.locked){ const mode=tool==='eraser'?'erase':(tool==='pencil'?'pencil':'brush'); paintLine(editCtx(l),pointer.lastIx,pointer.lastIy,p.x,p.y,mode); afterEdit(l); } }
+  if(tool==='brush'||tool==='eraser'){ if(pointer.stroke){ brushStrokeSegment(pointer.lastIx,pointer.lastIy,p.x,p.y); previewBrushStroke(); } }
+  else if(tool==='pencil'){ if(l&&!l.locked){ paintLine(editCtx(l),pointer.lastIx,pointer.lastIy,p.x,p.y,'pencil'); afterEdit(l); } }
   if(tool==='clone'){ cloneStamp(p.x,p.y,pointer.lastIx,pointer.lastIy); }
   if(tool==='blur'){ localFilterStamp(p.x,p.y,'blur'); }
   if(tool==='dodge'){ localFilterStamp(p.x,p.y,'dodge'); }
@@ -1855,10 +1947,11 @@ function onPointerUp(e){
   if(tool==='marquee'){ setRectSelection(pointer.ix,pointer.iy,p.x,p.y,'rect'); pushHistory('Marquee'); }
   else if(tool==='ellipse-marquee'){ setRectSelection(pointer.ix,pointer.iy,p.x,p.y,'ellipse'); pushHistory('Ellipse Marquee'); }
   else if(tool==='lasso'){ if(pointer.polyPoints&&pointer.polyPoints.length>2){ setPolygonSelection(pointer.polyPoints); pushHistory('Lasso'); } pointer.polyPoints=null; }
-  else if(tool==='crop'){ doCrop(pointer.ix,pointer.iy,p.x,p.y); }
+  else if(tool==='crop'){ const e=cropEnd(pointer.ix,pointer.iy,p.x,p.y); doCrop(pointer.ix,pointer.iy,e.x1,e.y1); }
   else if(tool.startsWith('shape')){ commitShape(pointer.ix,pointer.iy,p.x,p.y); }
   else if(tool==='gradient'){ drawGradient(pointer.ix,pointer.iy,p.x,p.y); pushHistory('Gradient'); }
-  else if(['brush','pencil','eraser'].includes(tool)){ pushHistory(tool.charAt(0).toUpperCase()+tool.slice(1)); }
+  else if(tool==='brush'||tool==='eraser'){ if(pointer.stroke) endBrushStroke(); pushHistory(tool==='eraser'?'Eraser':'Brush'); }
+  else if(tool==='pencil'){ pushHistory('Pencil'); }
   else if(tool==='move'){ commitMove(p); }
   else if(['clone','blur','smudge','dodge','burn'].includes(tool)){ pushHistory(tool.charAt(0).toUpperCase()+tool.slice(1)); }
   else if(tool==='heal'){ pushHistory('Healing Brush'); }
@@ -1955,7 +2048,17 @@ function patchHeal(dx,dy){ const l=activeLayer(); if(!l||!State.selection){toast
 //---- Overlay previews (drawn in image space via overlay canvas) ----
 function ov(){ octx.setTransform(1,0,0,1,0,0); octx.clearRect(0,0,State.width,State.height); return octx; }
 function drawMarqueePreview(x0,y0,x1,y1,shape){ const c=ov(); c.strokeStyle='#000';c.lineWidth=1;c.setLineDash([4,4]); if(shape==='ellipse'){ c.beginPath(); c.ellipse((x0+x1)/2,(y0+y1)/2,Math.abs(x1-x0)/2,Math.abs(y1-y0)/2,0,0,7); c.stroke(); } else c.strokeRect(Math.min(x0,x1),Math.min(y0,y1),Math.abs(x1-x0),Math.abs(y1-y0)); c.setLineDash([]); }
-function drawCropPreview(x0,y0,x1,y1){ const c=ov(); c.fillStyle='rgba(0,0,0,.5)'; c.fillRect(0,0,State.width,State.height); const x=Math.min(x0,x1),y=Math.min(y0,y1),w=Math.abs(x1-x0),h=Math.abs(y1-y0); c.clearRect(x,y,w,h); c.strokeStyle='#fff'; c.setLineDash([]); c.strokeRect(x,y,w,h); }
+// Constrain the crop end point to the chosen aspect ratio (Opt.cropAspect = w/h, 0=free, -1=original).
+function cropEnd(x0,y0,x1,y1){ let a=Opt.cropAspect; if(a===-1)a=State.width/State.height; if(!a||a<=0) return {x1,y1};
+  let w=Math.abs(x1-x0), h=Math.abs(y1-y0); if(w/(h||1) > a) h=w/a; else w=h*a;
+  const sx=x1>=x0?1:-1, sy=y1>=y0?1:-1; return {x1:x0+sx*w, y1:y0+sy*h}; }
+function drawCropPreview(x0,y0,x1,y1){ const c=ov(); c.fillStyle='rgba(0,0,0,.5)'; c.fillRect(0,0,State.width,State.height);
+  const x=Math.min(x0,x1),y=Math.min(y0,y1),w=Math.abs(x1-x0),h=Math.abs(y1-y0); c.clearRect(x,y,w,h);
+  const z=State.zoom||1;
+  c.strokeStyle='rgba(255,255,255,.4)'; c.lineWidth=1/z; c.setLineDash([]);
+  for(let i=1;i<3;i++){ c.beginPath(); c.moveTo(x+w*i/3,y); c.lineTo(x+w*i/3,y+h); c.stroke(); c.beginPath(); c.moveTo(x,y+h*i/3); c.lineTo(x+w,y+h*i/3); c.stroke(); }   // rule of thirds
+  c.strokeStyle='#fff'; c.lineWidth=1.5/z; c.strokeRect(x,y,w,h);
+  c.fillStyle='#fff'; c.font=`${11/z}px system-ui,sans-serif`; c.fillText(`${Math.round(w)} × ${Math.round(h)}`, x+4/z, y+14/z); }
 function drawShapePreview(x0,y0,x1,y1){ const c=ov(); c.fillStyle=rgbToHex(State.fg); c.strokeStyle=rgbToHex(State.fg); c.lineWidth=Opt.brushSize/4||2; if(State.tool==='shape-rect')c.fillRect(Math.min(x0,x1),Math.min(y0,y1),Math.abs(x1-x0),Math.abs(y1-y0)); else if(State.tool==='shape-ellipse'){c.beginPath();c.ellipse((x0+x1)/2,(y0+y1)/2,Math.abs(x1-x0)/2,Math.abs(y1-y0)/2,0,0,7);c.fill();} else {c.beginPath();c.moveTo(x0,y0);c.lineTo(x1,y1);c.stroke();} }
 function drawGradientPreview(x0,y0,x1,y1){ const c=ov(); c.strokeStyle='#fff'; c.setLineDash([2,2]); c.beginPath(); c.moveTo(x0,y0); c.lineTo(x1,y1); c.stroke(); c.setLineDash([]); }
 function drawLassoPreview(pts){ const c=ov(); c.strokeStyle='#000'; c.setLineDash([4,4]); c.beginPath(); c.moveTo(pts[0].x,pts[0].y); for(const p of pts)c.lineTo(p.x,p.y); c.stroke(); c.setLineDash([]); }
@@ -2757,20 +2860,26 @@ function renderOptionsBar(){
     html+=`<label>Size <input type="range" id="oSize" min="1" max="400" value="${Opt.brushSize}"><span class="val" id="oSizeV">${Opt.brushSize}</span></label>`;
     if(['brush','eraser','clone'].includes(State.tool)) html+=`<label>Hardness <input type="range" id="oHard" min="0" max="100" value="${Opt.brushHardness}"><span class="val" id="oHardV">${Opt.brushHardness}</span></label>`;
     if(['brush','pencil','eraser','clone','heal'].includes(State.tool)) html+=`<label>Opacity <input type="range" id="oOpac" min="1" max="100" value="${Opt.brushOpacity}"><span class="val" id="oOpacV">${Opt.brushOpacity}</span></label>`;
+    if(['brush','eraser'].includes(State.tool)){ html+=`<label>Flow <input type="range" id="oFlow" min="1" max="100" value="${Opt.brushFlow}"><span class="val" id="oFlowV">${Opt.brushFlow}</span></label><button id="oDyn" title="Brush dynamics">Dynamics…</button>`; }
     if(['blur','smudge','dodge','burn'].includes(State.tool)) html+=`<label>Strength <input type="range" id="oStr" min="1" max="100" value="${Opt.strength}"><span class="val" id="oStrV">${Opt.strength}</span></label>`;
   }
   if(['wand','bucket'].includes(State.tool)) html+=`<label>Tolerance <input type="range" id="oTol" min="0" max="150" value="${Opt.tolerance}"><span class="val" id="oTolV">${Opt.tolerance}</span></label>`;
   if(State.tool==='gradient'){ const g=curGradient(); const t=v=>`<option value="${v}" ${g.type===v?'selected':''}>${v[0].toUpperCase()+v.slice(1)}</option>`;
     html+=`<label>Gradient <canvas id="oGradSwatch" width="80" height="18" style="width:80px;height:18px;border:1px solid var(--line);border-radius:3px;vertical-align:middle;cursor:pointer"></canvas></label><button id="oGradEdit">Edit…</button><label>Type <select id="oGrad">${t('linear')}${t('radial')}${t('angle')}${t('reflected')}${t('diamond')}</select></label><label style="min-width:auto"><input type="checkbox" id="oGradRev" ${g.reverse?'checked':''}> Reverse</label>`; }
   if(State.tool==='text'){ html+=`<label>Font <select id="oFont"><option>Arial</option><option>Georgia</option><option>Impact</option><option>Courier New</option></select></label><label>Size <input type="number" id="oFontSize" value="${Opt.fontSize}"></label>`; }
+  if(State.tool==='crop'){ const R=[['0','Free'],['-1','Original'],['1','1:1'],['0.8','4:5'],['1.25','5:4'],['1.5','3:2'],['0.6667','2:3'],['1.7778','16:9'],['0.5625','9:16']];
+    const cur=String(Opt.cropAspect); const opts=R.map(([v,n])=>`<option value="${v}" ${cur===v||(cur==='0.6667'&&v==='0.6667')?'selected':''}>${n}</option>`).join('');
+    html+=`<label>Ratio <select id="oCropR">${opts}</select></label><span style="color:var(--text-dim)">drag to crop · rule-of-thirds guide</span>`; }
   if(State.tool==='zoom'){ html+=`<button id="zoomFit">Fit Screen</button><button id="zoom100">100%</button>`; }
   bar.innerHTML=html;
   const bind=(id,vid,key,fn)=>{ const el=$('#'+id); if(!el)return; el.oninput=()=>{ Opt[key]=+el.value; if(vid)$('#'+vid).textContent=el.value; if(fn)fn(); }; };
-  bind('oSize','oSizeV','brushSize'); bind('oHard','oHardV','brushHardness'); bind('oOpac','oOpacV','brushOpacity'); bind('oStr','oStrV','strength'); bind('oTol','oTolV','tolerance');
+  bind('oSize','oSizeV','brushSize'); bind('oHard','oHardV','brushHardness'); bind('oOpac','oOpacV','brushOpacity'); bind('oStr','oStrV','strength'); bind('oTol','oTolV','tolerance'); bind('oFlow','oFlowV','brushFlow');
+  if($('#oDyn')) $('#oDyn').onclick=brushDynamicsDialog;
   if($('#oGrad'))$('#oGrad').onchange=e=>{ curGradient().type=e.target.value; Opt.gradientType=e.target.value; };
   if($('#oGradRev'))$('#oGradRev').onchange=e=>{ curGradient().reverse=e.target.checked; };
   if($('#oGradSwatch')){ paintGradientSwatch($('#oGradSwatch'), curGradient().stops); $('#oGradSwatch').onclick=()=>openGradientEditor(()=>renderOptionsBar()); }
   if($('#oGradEdit'))$('#oGradEdit').onclick=()=>openGradientEditor(()=>renderOptionsBar());
+  if($('#oCropR'))$('#oCropR').onchange=e=>{ Opt.cropAspect=parseFloat(e.target.value); };
   if($('#oFont'))$('#oFont').onchange=e=>Opt.fontFamily=e.target.value;
   if($('#oFontSize'))$('#oFontSize').oninput=e=>Opt.fontSize=+e.target.value;
   if($('#zoomFit'))$('#zoomFit').onclick=fitToScreen;
@@ -4092,6 +4201,8 @@ const MENUS={
     {label:'Release Compound Path',kbd:'⇧⌘8',fn:()=>{ try{ releaseCompoundPath(); toast('Released'); }catch(err){ toast(err.message); } }},
     {label:'Color Range…',fn:()=>colorRangeDialog()},
     {label:'Select and Mask…',kbd:'⌥⌘R',fn:()=>selectAndMaskDialog()},
+    {label:'Select Subject',fn:()=>selectSubject()},
+    {label:'Remove Background…',fn:()=>removeBackgroundDialog()},
     {label:'Quick Mask Mode',kbd:'Q',fn:()=>toggleQuickMask()},
     {sub:'Modify'},
     {label:'Feather…',kbd:'⇧F6',fn:()=>{ if(!State.selection){toast('No selection');return;} showDialog(`<h3>Feather Selection</h3><div class="dbody">${sliderRow('Radius (px)','fRad',0,100,4)}</div>`, ()=>featherSelection(+$('#fRad').value),'OK'); setTimeout(()=>{$('#fRad').oninput=()=>$('#fRadV').textContent=$('#fRad').value;},10); }},
